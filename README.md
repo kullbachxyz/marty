@@ -22,6 +22,11 @@ cargo build --release
 sudo cp target/release/marty /usr/local/bin/
 ```
 
+## Data Locations
+- `~/.config/marty/config` Config file (accounts, active profile, encrypted session blob).
+- `~/.local/share/marty/crypto/` Matrix SDK encrypted crypto store (keys, device state).
+- `~/.local/share/marty/messages/` Encrypted local message archive per room.
+
 ## Project Structure
 ```text
 marty/
