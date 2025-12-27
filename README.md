@@ -4,10 +4,14 @@ A Matrix TUI client inspired by gurk-rs.
 
 ## Features
 - Slim channel list, message view, and input box layout
-- Matrix login with persistent sessions
+- Matrix login with persistent, encrypted sessions
 - E2EE with SAS emoji verification
 - Encrypted local message archive (passphrase protected)
 - Join rooms or start DMs from the TUI
+- Invite support with accept/decline from the messages pane
+- Backfill messages since last run
+- Unread counts per channel
+- Desktop notifications via `notify-send`
 
 ## Installation
 - Install Rust (stable) and Cargo
@@ -26,7 +30,7 @@ sudo cp target/release/marty /usr/local/bin/
 - [ ] multi account support
 - [ ] Project Page
 - [ ] improve help page
-- [ ] Desktop notification support
+- [x] Desktop notification support
 - [ ] Persist [accounts.session_encrypted] in the DB
 - [ ] Attachment support (xdg-open)
 - [ ] User verification support
