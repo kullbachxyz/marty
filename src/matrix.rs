@@ -1,6 +1,3 @@
-use std::fs::{self, OpenOptions};
-use std::io::Write;
-use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
@@ -8,20 +5,17 @@ use matrix_sdk::config::SyncSettings;
 use matrix_sdk::ruma::events::room::message::{MessageType, OriginalSyncRoomMessageEvent};
 use matrix_sdk::ruma::RoomId;
 use matrix_sdk::encryption::verification::{
-    AcceptSettings, SasState, SasVerification, VerificationRequestState,
+    AcceptSettings, SasState, SasVerification, Verification, VerificationRequestState,
 };
 use matrix_sdk::encryption::EncryptionSettings;
 use matrix_sdk::matrix_auth::MatrixSession;
-use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::{room::Room, Client, RoomState};
-use matrix_sdk::ruma::events::{AnyMessageLikeEvent, AnyTimelineEvent, MessageLikeEvent};
 use matrix_sdk::ruma::events::key::verification::{ShortAuthenticationString, VerificationMethod};
-use matrix_sdk::ruma::events::room::message::OriginalRoomMessageEvent;
-use matrix_sdk::ruma::uint;
 use tokio::sync::{mpsc, Mutex};
 use std::sync::Arc;
 
 use crate::config::AccountConfig;
+use crate::storage::{ensure_room_dir, room_log_path, read_encrypted, write_encrypted};
 
 #[derive(Debug, Clone)]
 pub struct RoomInfo {
@@ -60,7 +54,7 @@ pub enum MatrixCommand {
     CancelVerification,
 }
 
-pub async fn build_client(homeserver: &str) -> Result<Client> {
+pub async fn build_client(homeserver: &str, passphrase: &str) -> Result<Client> {
     let crypto_dir = crate::config::crypto_dir().context("crypto dir")?;
     let settings = EncryptionSettings {
         auto_enable_cross_signing: true,
@@ -69,7 +63,7 @@ pub async fn build_client(homeserver: &str) -> Result<Client> {
     };
     Client::builder()
         .homeserver_url(homeserver)
-        .sqlite_store(crypto_dir, None)
+        .sqlite_store(crypto_dir, Some(passphrase))
         .with_encryption_settings(settings)
         .build()
         .await
@@ -80,8 +74,19 @@ pub async fn login(
     homeserver: &str,
     username: &str,
     password: &str,
+    passphrase: &str,
 ) -> Result<(Client, AccountConfig)> {
-    let client = build_client(homeserver).await?;
+    let client = build_client(homeserver, passphrase).await?;
+    let account = login_with_client(&client, homeserver, username, password).await?;
+    Ok((client, account))
+}
+
+pub async fn login_with_client(
+    client: &Client,
+    homeserver: &str,
+    username: &str,
+    password: &str,
+) -> Result<AccountConfig> {
     let response = client
         .matrix_auth()
         .login_username(username, password)
@@ -91,34 +96,31 @@ pub async fn login(
         .context("matrix login")?;
 
     let session = MatrixSession::from(&response);
-    let account = AccountConfig {
+    Ok(AccountConfig {
         homeserver: homeserver.to_string(),
         username: username.to_string(),
         user_id: Some(response.user_id.to_string()),
         display_name: None,
         session: Some(session),
-    };
-
-    Ok((client, account))
+    })
 }
 
 pub async fn start_sync(
     client: Client,
-    data_dir: PathBuf,
+    passphrase: String,
     mut cmd_rx: mpsc::UnboundedReceiver<MatrixCommand>,
     evt_tx: mpsc::UnboundedSender<MatrixEvent>,
 ) -> Result<()> {
     let sas_state: Arc<Mutex<Option<SasVerification>>> = Arc::new(Mutex::new(None));
     let _ = client.sync_once(SyncSettings::default()).await;
     publish_rooms(&client, &evt_tx).await;
-    backfill_rooms(&client, &data_dir, &evt_tx).await;
 
     let evt_tx_clone = evt_tx.clone();
-    let data_dir_clone = data_dir.clone();
+    let passphrase_clone = passphrase.clone();
     client
         .add_event_handler(move |ev: OriginalSyncRoomMessageEvent, room: Room| {
             let evt_tx = evt_tx_clone.clone();
-            let data_dir = data_dir_clone.clone();
+            let passphrase = passphrase_clone.clone();
             async move {
                 if room.state() != RoomState::Joined {
                     return;
@@ -135,7 +137,7 @@ pub async fn start_sync(
                         body: body.clone(),
                         timestamp: ts,
                     });
-                let _ = store_message(&data_dir, &room_id, ts, &sender, &body);
+                let _ = store_message_encrypted(&passphrase, &room_id, ts, &sender, &body);
             }
         });
 
@@ -175,7 +177,10 @@ pub async fn start_sync(
             MatrixCommand::StartVerification => {
                 let Some(user_id) = client.user_id() else { continue };
                 if let Ok(Some(user)) = client.encryption().get_user_identity(user_id).await {
-                    if let Ok(request) = user.request_verification().await {
+                    if let Ok(request) = user
+                        .request_verification_with_methods(vec![VerificationMethod::SasV1])
+                        .await
+                    {
                         let evt_tx = evt_tx.clone();
                         let sas_state = sas_state.clone();
                         let _ = evt_tx.send(MatrixEvent::VerificationStatus {
@@ -183,59 +188,28 @@ pub async fn start_sync(
                         });
                         tokio::spawn(async move {
                             let mut changes = request.changes();
+                            let mut started = false;
                             while let Some(state) = changes.next().await {
                                 match state {
+                                    VerificationRequestState::Transitioned { verification } => {
+                                        if let Some(sas) = verification.sas() {
+                                            started = true;
+                                            let _ = evt_tx.send(MatrixEvent::VerificationStatus {
+                                                message: "SAS started. Waiting for emojis...".to_string(),
+                                            });
+                                            start_sas_flow(sas, &sas_state, &evt_tx).await;
+                                        }
+                                    }
                                     VerificationRequestState::Ready { .. } => {
+                                        if started {
+                                            continue;
+                                        }
                                         let _ = evt_tx.send(MatrixEvent::VerificationStatus {
                                             message: "SAS requested. Waiting for emojis...".to_string(),
                                         });
                                         if let Ok(Some(sas)) = request.start_sas().await {
-                                            let settings = AcceptSettings::with_allowed_methods(vec![
-                                                ShortAuthenticationString::Emoji,
-                                            ]);
-                                            let _ = sas.accept_with_settings(settings).await;
-                                            let mut guard = sas_state.lock().await;
-                                            *guard = Some(sas.clone());
-                                            let evt_tx = evt_tx.clone();
-                                            tokio::spawn(async move {
-                                                let mut sas_changes = sas.changes();
-                                                while let Some(state) = sas_changes.next().await {
-                                                    match state {
-                                                        SasState::KeysExchanged { emojis, .. } => {
-                                                            if let Some(emojis) = emojis {
-                                                                let pairs = emojis
-                                                                    .emojis
-                                                                    .iter()
-                                                                    .map(|e| {
-                                                                        (
-                                                                            e.symbol.to_string(),
-                                                                            e.description.to_string(),
-                                                                        )
-                                                                    })
-                                                                    .collect();
-                                                                let _ = evt_tx.send(
-                                                                    MatrixEvent::VerificationEmojis { emojis: pairs },
-                                                                );
-                                                            }
-                                                        }
-                                                        SasState::Done { .. } => {
-                                                            let _ = evt_tx.send(
-                                                                MatrixEvent::VerificationDone,
-                                                            );
-                                                            break;
-                                                        }
-                                                        SasState::Cancelled(cancel) => {
-                                                            let _ = evt_tx.send(
-                                                                MatrixEvent::VerificationCancelled {
-                                                                    reason: cancel.reason().to_string(),
-                                                                },
-                                                            );
-                                                            break;
-                                                        }
-                                                        _ => {}
-                                                    }
-                                                }
-                                            });
+                                            started = true;
+                                            start_sas_flow(sas, &sas_state, &evt_tx).await;
                                         }
                                     }
                                     VerificationRequestState::Cancelled(cancel) => {
@@ -287,61 +261,71 @@ async fn publish_rooms(client: &Client, evt_tx: &mpsc::UnboundedSender<MatrixEve
     let _ = evt_tx.send(MatrixEvent::Rooms(room_infos));
 }
 
-async fn backfill_rooms(
-    client: &Client,
-    data_dir: &Path,
+async fn start_sas_flow(
+    sas: SasVerification,
+    sas_state: &Arc<Mutex<Option<SasVerification>>>,
     evt_tx: &mpsc::UnboundedSender<MatrixEvent>,
 ) {
-    for room in client.joined_rooms() {
-        let room_id = room.room_id().to_string();
-        let mut options = MessagesOptions::backward();
-        options.limit = uint!(50);
-        if let Ok(messages) = room.messages(options).await {
-            for event in messages.chunk.into_iter().rev() {
-                if let Some((sender, body, ts)) = extract_text_message(&event.event) {
-                    let _ = evt_tx.send(MatrixEvent::Message {
-                        room_id: room_id.clone(),
-                        sender: sender.clone(),
-                        body: body.clone(),
-                        timestamp: ts,
-                    });
-                    let _ = store_message(data_dir, &room_id, ts, &sender, &body);
+    let settings = AcceptSettings::with_allowed_methods(vec![ShortAuthenticationString::Emoji]);
+    let _ = sas.accept_with_settings(settings).await;
+    {
+        let mut guard = sas_state.lock().await;
+        *guard = Some(sas.clone());
+    }
+    let evt_tx = evt_tx.clone();
+    tokio::spawn(async move {
+        let mut sas_changes = sas.changes();
+        while let Some(state) = sas_changes.next().await {
+            match state {
+                SasState::KeysExchanged { emojis, .. } => {
+                    if let Some(emojis) = emojis {
+                        let pairs = emojis
+                            .emojis
+                            .iter()
+                            .map(|e| (e.symbol.to_string(), e.description.to_string()))
+                            .collect();
+                        let _ = evt_tx.send(MatrixEvent::VerificationEmojis { emojis: pairs });
+                    }
                 }
+                SasState::Done { .. } => {
+                    let _ = evt_tx.send(MatrixEvent::VerificationDone);
+                    break;
+                }
+                SasState::Cancelled(cancel) => {
+                    let _ = evt_tx.send(MatrixEvent::VerificationCancelled {
+                        reason: cancel.reason().to_string(),
+                    });
+                    break;
+                }
+                _ => {}
             }
         }
-    }
+    });
 }
 
-fn extract_text_message(raw: &matrix_sdk::ruma::serde::Raw<AnyTimelineEvent>) -> Option<(String, String, i64)> {
-    let event = raw.deserialize().ok()?;
-    if let AnyTimelineEvent::MessageLike(AnyMessageLikeEvent::RoomMessage(MessageLikeEvent::Original(
-        OriginalRoomMessageEvent { sender, content, origin_server_ts, .. },
-    ))) = event
-    {
-        if let MessageType::Text(text) = content.msgtype {
-            let ts = i64::from(origin_server_ts.0);
-            return Some((sender.to_string(), text.body, ts));
-        }
-    }
-    None
-}
 
-fn store_message(
-    data_dir: &Path,
+fn store_message_encrypted(
+    passphrase: &str,
     room_id: &str,
     ts: i64,
     sender: &str,
     body: &str,
 ) -> Result<()> {
-    let room_dir = data_dir.join("messages").join(room_id.replace(':', "_"));
-    fs::create_dir_all(&room_dir)?;
-    let path = room_dir.join("messages.jsonl");
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    let record = serde_json::json!({
+    let messages_dir = crate::config::messages_dir()?;
+    let _ = ensure_room_dir(&messages_dir, room_id)?;
+    let path = room_log_path(&messages_dir, room_id);
+    let mut records = if path.exists() {
+        let raw = read_encrypted(&path, passphrase)?;
+        serde_json::from_slice::<Vec<serde_json::Value>>(&raw).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    records.push(serde_json::json!({
         "timestamp": ts,
         "sender": sender,
         "body": body,
-    });
-    writeln!(file, "{}", record)?;
+    }));
+    let data = serde_json::to_vec(&records)?;
+    write_encrypted(&path, passphrase, &data)?;
     Ok(())
 }

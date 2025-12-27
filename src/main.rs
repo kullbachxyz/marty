@@ -1,8 +1,10 @@
 mod config;
 mod matrix;
+mod storage;
 
 use std::collections::HashMap;
 use std::env;
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -24,8 +26,8 @@ use ratatui::Terminal;
 use rpassword::read_password;
 use tokio::sync::mpsc;
 
-use crate::config::{config_path, data_dir, load_config, save_config};
-use crate::matrix::{build_client, login, start_sync, MatrixCommand, MatrixEvent, RoomInfo};
+use crate::config::{config_path, crypto_dir, load_config, save_config};
+use crate::matrix::{build_client, login, login_with_client, start_sync, MatrixCommand, MatrixEvent, RoomInfo};
 
 const TICK_RATE: Duration = Duration::from_millis(100);
 const HELP_LINES: [&str; 20] = [
@@ -76,6 +78,7 @@ struct App {
     add_prompt: Option<String>,
     verification_emojis: Option<Vec<(String, String)>>,
     verification_status: Option<String>,
+    verification_until: Option<Instant>,
     help_open: bool,
     help_scroll: u16,
     media_dir: PathBuf,
@@ -95,6 +98,7 @@ impl App {
             add_prompt: None,
             verification_emojis: None,
             verification_status: None,
+            verification_until: None,
             help_open: false,
             help_scroll: 0,
             media_dir: ensure_media_dir(),
@@ -173,16 +177,19 @@ impl App {
         self.verification_emojis = Some(emojis);
         self.verification_status =
             Some("Match the emojis on your other device. Y=confirm, N=cancel".to_string());
+        self.verification_until = None;
     }
 
     fn show_verification_status(&mut self, status: &str) {
         self.verification_emojis = None;
         self.verification_status = Some(status.to_string());
+        self.verification_until = Some(Instant::now() + Duration::from_secs(3));
     }
 
     fn clear_verification(&mut self) {
         self.verification_emojis = None;
         self.verification_status = None;
+        self.verification_until = None;
     }
 
     fn on_escape(&mut self) {
@@ -605,6 +612,7 @@ fn open_url(url: &str) -> bool {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let passphrase = prompt_password("Passphrase: ")?;
     let config_file = config_path()?;
     let mut cfg = load_config(&config_file)?;
 
@@ -612,39 +620,44 @@ async fn main() -> Result<()> {
         let homeserver = prompt("Homeserver URL: ")?;
         let username = prompt("Username: ")?;
         let password = prompt_password("Password: ")?;
-        let (client, account) = login(&homeserver, &username, &password).await?;
+        let (client, account) =
+            login_with_recovery(&homeserver, &username, &password, &passphrase).await?;
         cfg.accounts.push(account.clone());
         cfg.active = Some(0);
         save_config(&config_file, &cfg)?;
-        return start_matrix(client, data_dir()?).await;
+        return start_matrix(client, passphrase).await;
     } else {
         let idx = cfg.active.unwrap_or(0).min(cfg.accounts.len().saturating_sub(1));
         cfg.accounts[idx].clone()
     };
 
     let client = if let Some(session) = account.session.clone() {
-        let client = build_client(&account.homeserver).await?;
+        let client = build_client_with_recovery(&account.homeserver, &passphrase).await?;
         if client.restore_session(session).await.is_ok() {
             client
         } else {
             let password = prompt_password("Password: ")?;
-            let (client, updated) = login(&account.homeserver, &account.username, &password).await?;
+            let (client, updated) =
+                login_with_recovery(&account.homeserver, &account.username, &password, &passphrase)
+                    .await?;
             update_account_session(&mut cfg, &updated);
             save_config(&config_file, &cfg)?;
             client
         }
     } else {
         let password = prompt_password("Password: ")?;
-        let (client, updated) = login(&account.homeserver, &account.username, &password).await?;
+        let (client, updated) =
+            login_with_recovery(&account.homeserver, &account.username, &password, &passphrase)
+                .await?;
         update_account_session(&mut cfg, &updated);
         save_config(&config_file, &cfg)?;
         client
     };
 
-    start_matrix(client, data_dir()?).await
+    start_matrix(client, passphrase).await
 }
 
-async fn start_matrix(client: matrix_sdk::Client, data_root: PathBuf) -> Result<()> {
+async fn start_matrix(client: matrix_sdk::Client, passphrase: String) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -654,7 +667,7 @@ async fn start_matrix(client: matrix_sdk::Client, data_root: PathBuf) -> Result<
     let (evt_tx, evt_rx) = mpsc::unbounded_channel();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
-    tokio::spawn(start_sync(client, data_root, cmd_rx, evt_tx));
+    tokio::spawn(start_sync(client, passphrase, cmd_rx, evt_tx));
 
     let res = run_app(&mut terminal, evt_rx, cmd_tx);
 
@@ -697,6 +710,13 @@ fn run_app(
                 }
                 MatrixEvent::VerificationCancelled { reason } => {
                     app.show_verification_status(&format!("Verification cancelled: {}", reason));
+                }
+            }
+        }
+        if app.verification_emojis.is_none() {
+            if let Some(until) = app.verification_until {
+                if Instant::now() >= until {
+                    app.clear_verification();
                 }
             }
         }
@@ -794,7 +814,15 @@ fn run_app(
                     match key.code {
                         KeyCode::Char('q') => app.should_quit = true,
                         KeyCode::F(1) => app.toggle_help(),
-                        KeyCode::Esc => app.on_escape(),
+                        KeyCode::Esc => {
+                            if app.verification_status.is_some()
+                                && app.verification_emojis.is_none()
+                            {
+                                app.clear_verification();
+                            } else {
+                                app.on_escape();
+                            }
+                        }
                         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::ALT) => {
                             app.start_add_prompt();
                         }
@@ -890,6 +918,59 @@ fn update_account_session(cfg: &mut config::AppConfig, updated: &config::Account
     }
     cfg.accounts.push(updated.clone());
     cfg.active = Some(0);
+}
+
+async fn build_client_with_recovery(
+    homeserver: &str,
+    passphrase: &str,
+) -> Result<matrix_sdk::Client> {
+    match build_client(homeserver, passphrase).await {
+        Ok(client) => Ok(client),
+        Err(err) => {
+            let err_str = format!("{:#}", err);
+            if err_str.contains("EncryptedValue") || err_str.contains("decrypt") {
+                eprintln!("Crypto store appears unencrypted or passphrase mismatch.");
+                let answer = prompt("Type 'reset' to delete the crypto store and continue: ")?;
+                if answer.trim().eq_ignore_ascii_case("reset") {
+                    let dir = crypto_dir()?;
+                    if dir.exists() {
+                        fs::remove_dir_all(&dir)?;
+                    }
+                    return build_client(homeserver, passphrase).await;
+                }
+            }
+            Err(err)
+        }
+    }
+}
+
+async fn login_with_recovery(
+    homeserver: &str,
+    username: &str,
+    password: &str,
+    passphrase: &str,
+) -> Result<(matrix_sdk::Client, config::AccountConfig)> {
+    let mut client = build_client_with_recovery(homeserver, passphrase).await?;
+    match login_with_client(&client, homeserver, username, password).await {
+        Ok(account) => Ok((client, account)),
+        Err(err) => {
+            let err_str = format!("{:#}", err);
+            if err_str.contains("EncryptedValue") || err_str.contains("decrypt") {
+                eprintln!("Crypto store appears unencrypted or passphrase mismatch.");
+                let answer = prompt("Type 'reset' to delete the crypto store and continue: ")?;
+                if answer.trim().eq_ignore_ascii_case("reset") {
+                    let dir = crypto_dir()?;
+                    if dir.exists() {
+                        fs::remove_dir_all(&dir)?;
+                    }
+                    client = build_client(homeserver, passphrase).await?;
+                    let account = login_with_client(&client, homeserver, username, password).await?;
+                    return Ok((client, account));
+                }
+            }
+            Err(err)
+        }
+    }
 }
 
 fn render_add_prompt(f: &mut ratatui::Frame, area: Rect, input: &str) {
