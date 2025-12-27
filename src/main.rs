@@ -30,17 +30,15 @@ use crate::config::{config_path, crypto_dir, load_config, save_config};
 use crate::matrix::{build_client, login, login_with_client, start_sync, MatrixCommand, MatrixEvent, RoomInfo};
 
 const TICK_RATE: Duration = Duration::from_millis(100);
-const HELP_LINES: [&str; 20] = [
+const HELP_LINES: [&str; 18] = [
     "App navigation",
     "  F1 Toggle help panel showing shortcuts.",
     "  Up One Channel Up",
     "  Down One Channel Down",
     "  Alt+A Add chat (room or user).",
+    "  Alt+J Join/add chat (room or user).",
     "  Alt+V Start verification (SAS).",
     "Message input",
-    "  /join <#alias|!id> Join a room.",
-    "  /dm <@user:server> Start a direct message.",
-    "  /verify Start verification (SAS).",
     "  Enter when input box empty in single-line mode Open URL from selected message.",
     "  Enter otherwise Send message.",
     "Message/channel selection",
@@ -343,25 +341,6 @@ fn format_sender(sender: &str) -> String {
 
 fn parse_command(text: &str) -> Option<MatrixCommand> {
     let trimmed = text.trim();
-    if let Some(rest) = trimmed.strip_prefix("/join ") {
-        let room = rest.trim();
-        if !room.is_empty() {
-            return Some(MatrixCommand::JoinRoom {
-                room: room.to_string(),
-            });
-        }
-    }
-    if let Some(rest) = trimmed.strip_prefix("/dm ") {
-        let user_id = rest.trim();
-        if !user_id.is_empty() {
-            return Some(MatrixCommand::CreateDirect {
-                user_id: user_id.to_string(),
-            });
-        }
-    }
-    if trimmed == "/verify" {
-        return Some(MatrixCommand::StartVerification);
-    }
     None
 }
 
@@ -612,9 +591,14 @@ fn open_url(url: &str) -> bool {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let passphrase = prompt_password("Passphrase: ")?;
     let config_file = config_path()?;
     let mut cfg = load_config(&config_file)?;
+    let passphrase_prompt = if cfg.accounts.is_empty() {
+        "Create passphrase: "
+    } else {
+        "Enter passphrase: "
+    };
+    let passphrase = prompt_password(passphrase_prompt)?;
 
     let account = if cfg.accounts.is_empty() {
         let homeserver = prompt("Homeserver URL: ")?;
@@ -824,6 +808,9 @@ fn run_app(
                             }
                         }
                         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::ALT) => {
+                            app.start_add_prompt();
+                        }
+                        KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::ALT) => {
                             app.start_add_prompt();
                         }
                         KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::ALT) => {
