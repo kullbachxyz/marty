@@ -45,6 +45,7 @@ pub enum MatrixEvent {
         body: String,
         timestamp: i64,
     },
+    BackfillDone,
     VerificationStatus {
         message: String,
     },
@@ -121,6 +122,7 @@ pub async fn start_sync(
     let _ = client.sync_once(SyncSettings::default()).await;
     publish_rooms(&client, &evt_tx).await;
     backfill_since_last_seen(&client, &passphrase, &evt_tx).await;
+    let _ = evt_tx.send(MatrixEvent::BackfillDone);
 
     let evt_tx_clone = evt_tx.clone();
     let passphrase_clone = passphrase.clone();

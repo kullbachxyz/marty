@@ -97,6 +97,8 @@ struct App {
     help_open: bool,
     help_scroll: u16,
     is_syncing: bool,
+    notifications_ready: bool,
+    own_user_id: Option<String>,
     should_quit: bool,
 }
 
@@ -120,6 +122,8 @@ impl App {
             help_open: false,
             help_scroll: 0,
             is_syncing: true,
+            notifications_ready: false,
+            own_user_id: None,
             should_quit: false,
         }
     }
@@ -386,6 +390,34 @@ impl App {
         if is_selected {
             self.mark_room_read(room_id);
         }
+    }
+
+    fn room_name(&self, room_id: &str) -> String {
+        self.rooms
+            .iter()
+            .find(|room| room.room_id == room_id)
+            .map(|room| room.name.clone())
+            .unwrap_or_else(|| room_id.to_string())
+    }
+
+    fn should_notify(&self, room_id: &str, sender: &str) -> bool {
+        if !self.notifications_ready {
+            return false;
+        }
+        if self
+            .selected_room_id()
+            .as_deref()
+            .map(|id| id == room_id)
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        if let Some(own) = self.own_user_id.as_deref() {
+            if sender == own {
+                return false;
+            }
+        }
+        true
     }
 
     fn mark_room_read(&mut self, room_id: &str) {
@@ -666,6 +698,13 @@ fn open_url(url: &str) -> bool {
     }
 }
 
+fn notify_send(title: &str, body: &str) {
+    let _ = Command::new("notify-send")
+        .arg(title)
+        .arg(body)
+        .spawn();
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let config_file = config_path()?;
@@ -689,10 +728,11 @@ async fn main() -> Result<()> {
             login_with_recovery(&homeserver, &username, &password, &passphrase).await?;
         let mut account = account.clone();
         encrypt_account_session(&mut account, &passphrase)?;
+        let own_user_id = account.user_id.clone();
         cfg.accounts.push(account);
         cfg.active = Some(0);
         save_config(&config_file, &cfg)?;
-        return start_matrix(client, passphrase).await;
+        return start_matrix(client, passphrase, own_user_id).await;
     } else {
         let idx = cfg.active.unwrap_or(0).min(cfg.accounts.len().saturating_sub(1));
         cfg.accounts[idx].clone()
@@ -721,10 +761,14 @@ async fn main() -> Result<()> {
         client
     };
 
-    start_matrix(client, passphrase).await
+    start_matrix(client, passphrase, account.user_id.clone()).await
 }
 
-async fn start_matrix(client: matrix_sdk::Client, passphrase: String) -> Result<()> {
+async fn start_matrix(
+    client: matrix_sdk::Client,
+    passphrase: String,
+    own_user_id: Option<String>,
+) -> Result<()> {
     let (evt_tx, evt_rx) = mpsc::unbounded_channel();
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
@@ -736,7 +780,7 @@ async fn start_matrix(client: matrix_sdk::Client, passphrase: String) -> Result<
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let res = run_app(&mut terminal, evt_rx, cmd_tx, passphrase);
+    let res = run_app(&mut terminal, evt_rx, cmd_tx, passphrase, own_user_id);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -751,8 +795,10 @@ fn run_app(
     mut evt_rx: mpsc::UnboundedReceiver<MatrixEvent>,
     cmd_tx: mpsc::UnboundedSender<MatrixCommand>,
     passphrase: String,
+    own_user_id: Option<String>,
 ) -> io::Result<()> {
     let mut app = App::new();
+    app.own_user_id = own_user_id;
     let mut last_tick = Instant::now();
     if let Ok(base) = messages_dir() {
         if let Ok(persisted) = load_all_messages(&base, &passphrase) {
@@ -793,6 +839,13 @@ fn run_app(
                         &sender,
                         &body,
                     );
+                    if app.should_notify(&room_id, &sender) {
+                        let title = format!("{} — {}", app.room_name(&room_id), format_sender(&sender));
+                        notify_send(&title, &body);
+                    }
+                }
+                MatrixEvent::BackfillDone => {
+                    app.notifications_ready = true;
                 }
                 MatrixEvent::VerificationEmojis { emojis } => {
                     app.show_verification_emojis(emojis);
