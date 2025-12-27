@@ -152,6 +152,11 @@ pub fn append_message(
     } else {
         Vec::new()
     };
+    if let Some(event_id) = record.event_id.as_deref() {
+        if records.iter().any(|msg| msg.event_id.as_deref() == Some(event_id)) {
+            return Ok(());
+        }
+    }
     records.push(record);
     let data = serde_json::to_vec(&records)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
@@ -182,4 +187,19 @@ pub fn load_all_messages(
         out.push((room_key, records));
     }
     Ok(out)
+}
+
+pub fn latest_room_timestamp(
+    base: &Path,
+    room_id: &str,
+    passphrase: &str,
+) -> std::io::Result<Option<i64>> {
+    let path = room_log_path(base, room_id);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = read_encrypted(&path, passphrase)?;
+    let records = serde_json::from_slice::<Vec<StoredMessage>>(&raw).unwrap_or_default();
+    let max_ts = records.iter().map(|msg| msg.timestamp).max();
+    Ok(max_ts)
 }

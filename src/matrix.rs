@@ -2,21 +2,24 @@
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use matrix_sdk::config::SyncSettings;
-use matrix_sdk::ruma::events::room::message::{MessageType, OriginalSyncRoomMessageEvent};
-use matrix_sdk::ruma::RoomId;
+use matrix_sdk::ruma::events::room::message::{
+    MessageType, OriginalRoomMessageEvent, OriginalSyncRoomMessageEvent,
+};
+use matrix_sdk::ruma::{uint, RoomId};
 use matrix_sdk::encryption::verification::{
     AcceptSettings, SasState, SasVerification, VerificationRequestState,
 };
 use matrix_sdk::encryption::EncryptionSettings;
 use matrix_sdk::matrix_auth::MatrixSession;
-use matrix_sdk::{room::Room, Client, RoomState};
+use matrix_sdk::room::{MessagesOptions, Room};
+use matrix_sdk::{Client, RoomState};
 use matrix_sdk::DisplayName;
 use matrix_sdk::ruma::events::key::verification::{ShortAuthenticationString, VerificationMethod};
 use tokio::sync::{mpsc, Mutex};
 use std::sync::Arc;
 
 use crate::config::AccountConfig;
-use crate::storage::{append_message, StoredMessage};
+use crate::storage::{append_message, latest_room_timestamp, StoredMessage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoomListState {
@@ -117,6 +120,7 @@ pub async fn start_sync(
     let sas_state: Arc<Mutex<Option<SasVerification>>> = Arc::new(Mutex::new(None));
     let _ = client.sync_once(SyncSettings::default()).await;
     publish_rooms(&client, &evt_tx).await;
+    backfill_since_last_seen(&client, &passphrase, &evt_tx).await;
 
     let evt_tx_clone = evt_tx.clone();
     let passphrase_clone = passphrase.clone();
@@ -331,6 +335,90 @@ async fn publish_rooms(client: &Client, evt_tx: &mpsc::UnboundedSender<MatrixEve
         });
     }
     let _ = evt_tx.send(MatrixEvent::Rooms(room_infos));
+}
+
+struct BackfillMessage {
+    event_id: String,
+    sender: String,
+    body: String,
+    timestamp: i64,
+}
+
+async fn backfill_since_last_seen(
+    client: &Client,
+    passphrase: &str,
+    evt_tx: &mpsc::UnboundedSender<MatrixEvent>,
+) {
+    let Ok(messages_dir) = crate::config::messages_dir() else {
+        return;
+    };
+    for room in client.joined_rooms() {
+        let room_id = room.room_id().to_string();
+        let last_ts = match latest_room_timestamp(&messages_dir, &room_id, passphrase) {
+            Ok(Some(ts)) => ts,
+            _ => continue,
+        };
+        let mut from: Option<String> = None;
+        let mut collected: Vec<BackfillMessage> = Vec::new();
+        loop {
+            let mut options = MessagesOptions::backward();
+            options.limit = uint!(50);
+            if let Some(token) = from.as_ref() {
+                options.from = Some(token.clone());
+            }
+            let Ok(messages) = room.messages(options).await else {
+                break;
+            };
+            if messages.chunk.is_empty() {
+                break;
+            }
+            let mut stop = false;
+            for event in messages.chunk {
+                let Ok(message) = event.event.deserialize_as::<OriginalRoomMessageEvent>() else {
+                    continue;
+                };
+                let ts = i64::from(message.origin_server_ts.0);
+                if ts <= last_ts {
+                    stop = true;
+                    break;
+                }
+                let MessageType::Text(text) = message.content.msgtype else {
+                    continue;
+                };
+                collected.push(BackfillMessage {
+                    event_id: message.event_id.to_string(),
+                    sender: message.sender.to_string(),
+                    body: text.body.clone(),
+                    timestamp: ts,
+                });
+            }
+            if stop {
+                break;
+            }
+            match messages.end {
+                Some(token) => from = Some(token),
+                None => break,
+            }
+        }
+        collected.sort_by_key(|msg| msg.timestamp);
+        for msg in collected {
+            let _ = evt_tx.send(MatrixEvent::Message {
+                room_id: room_id.clone(),
+                event_id: msg.event_id.clone(),
+                sender: msg.sender.clone(),
+                body: msg.body.clone(),
+                timestamp: msg.timestamp,
+            });
+            let _ = store_message_encrypted(
+                passphrase,
+                &room_id,
+                msg.timestamp,
+                &msg.sender,
+                &msg.body,
+                Some(&msg.event_id),
+            );
+        }
+    }
 }
 
 async fn resolve_room_name(client: &Client, room: &Room, fallback: &str) -> String {
