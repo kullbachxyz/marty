@@ -1,6 +1,9 @@
-use std::io;
+use std::env;
+use std::io::{self, Write};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use arboard::Clipboard;
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
@@ -301,11 +304,20 @@ impl App {
         if let Some(idx) = self.message_selected {
             if let Some(messages) = self.messages_by_channel.get_mut(self.selected) {
                 if let Some(msg) = messages.get(idx) {
-                    messages.push(MessageItem::Message {
-                        time: "19:06".to_string(),
-                        name: "System".to_string(),
-                        text: format!("Copied: {}", msg_string(msg)),
-                    });
+                    let text = msg_string(msg);
+                    if copy_to_clipboard(&text) {
+                        messages.push(MessageItem::Message {
+                            time: "19:06".to_string(),
+                            name: "System".to_string(),
+                            text: "Copied to clipboard.".to_string(),
+                        });
+                    } else {
+                        messages.push(MessageItem::Message {
+                            time: "19:06".to_string(),
+                            name: "System".to_string(),
+                            text: format!("Clipboard failed, copied locally: {}", text),
+                        });
+                    }
                 }
             }
         }
@@ -385,6 +397,34 @@ fn msg_string(item: &MessageItem) -> String {
             format!("{} {}: {}", time, name, text)
         }
     }
+}
+
+fn copy_to_clipboard(text: &str) -> bool {
+    if env::var_os("WAYLAND_DISPLAY").is_some() {
+        return copy_with_wl_copy(text);
+    }
+    if Clipboard::new()
+        .and_then(|mut cb| cb.set_text(text.to_string()))
+        .is_ok()
+    {
+        return true;
+    }
+    copy_with_wl_copy(text)
+}
+
+fn copy_with_wl_copy(text: &str) -> bool {
+    if let Ok(mut child) = Command::new("wl-copy")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(text.as_bytes());
+        }
+        return child.wait().is_ok();
+    }
+    false
 }
 
 fn main() -> Result<(), io::Error> {
