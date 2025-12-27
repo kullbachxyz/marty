@@ -29,11 +29,13 @@ use crate::config::{
     config_path, crypto_dir, decrypt_sessions, encrypt_account_session, encrypt_missing_sessions,
     load_config, messages_dir, save_config,
 };
-use crate::matrix::{build_client, login_with_client, start_sync, MatrixCommand, MatrixEvent, RoomInfo};
+use crate::matrix::{
+    build_client, login_with_client, start_sync, MatrixCommand, MatrixEvent, RoomInfo, RoomListState,
+};
 use crate::storage::load_all_messages;
 
 const TICK_RATE: Duration = Duration::from_millis(100);
-const HELP_LINES: [&str; 19] = [
+const HELP_LINES: [&str; 21] = [
     "App navigation",
     "  F1 Toggle help panel showing shortcuts.",
     "  Up One Channel Up",
@@ -41,6 +43,8 @@ const HELP_LINES: [&str; 19] = [
     "  Alt+A Add chat (room or user).",
     "  Alt+J Join/add chat (room or user).",
     "  Alt+D Delete chat (type DELETE to confirm).",
+    "  Ctrl+A Accept invite.",
+    "  Ctrl+D Decline invite.",
     "  Alt+V Start verification (SAS).",
     "Message input",
     "  Enter when input box empty in single-line mode Open URL from selected message.",
@@ -306,6 +310,17 @@ impl App {
         self.rooms.get(self.selected).map(|room| room.room_id.clone())
     }
 
+    fn selected_room(&self) -> Option<&RoomInfo> {
+        self.rooms.get(self.selected)
+    }
+
+    fn selected_room_is_invited(&self) -> bool {
+        matches!(
+            self.selected_room().map(|room| room.state),
+            Some(RoomListState::Invited)
+        )
+    }
+
     fn current_messages(&self) -> Option<&Vec<MessageItem>> {
         let room_id = self.selected_room_id()?;
         self.messages_by_room.get(&room_id)
@@ -421,6 +436,18 @@ fn render_messages_area(
     let inner = block.inner(area);
     if inner.width == 0 || inner.height == 0 {
         return;
+    }
+    if let Some(room) = app.selected_room() {
+        if room.state == RoomListState::Invited {
+            let inviter = room.inviter.as_deref().unwrap_or("Unknown user");
+            let lines = vec![
+                Line::from(format!("Invitation from {}", inviter)),
+                Line::from("Ctrl+A to accept, Ctrl+D to decline."),
+            ];
+            let text = Paragraph::new(lines).wrap(Wrap { trim: false });
+            f.render_widget(text, inner);
+            return;
+        }
     }
     let messages = app
         .current_messages()
@@ -756,7 +783,14 @@ fn run_app(
                 let channels: Vec<ListItem> = app
                     .rooms
                     .iter()
-                    .map(|room| ListItem::new(Line::from(Span::raw(&room.name))))
+                    .map(|room| {
+                        let label = if room.state == RoomListState::Invited {
+                            format!("[invite] {}", room.name)
+                        } else {
+                            room.name.clone()
+                        };
+                        ListItem::new(Line::from(Span::raw(label)))
+                    })
                     .collect();
 
                 let mut list_state = ListState::default();
@@ -844,6 +878,20 @@ fn run_app(
                             let _ = cmd_tx.send(MatrixCommand::StartVerification);
                             app.show_verification_status("Waiting for verification...");
                         }
+                        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if app.selected_room_is_invited() {
+                                if let Some(room_id) = app.selected_room_id() {
+                                    let _ = cmd_tx.send(MatrixCommand::AcceptInvite { room_id });
+                                }
+                            }
+                        }
+                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            if app.selected_room_is_invited() {
+                                if let Some(room_id) = app.selected_room_id() {
+                                    let _ = cmd_tx.send(MatrixCommand::RejectInvite { room_id });
+                                }
+                            }
+                        }
                         KeyCode::Char('y') if app.verification_emojis.is_some() => {
                             let _ = cmd_tx.send(MatrixCommand::ConfirmVerification);
                             app.show_verification_status("Verification confirmed.");
@@ -889,6 +937,9 @@ fn run_app(
                                 if let Some(cmd) = parse_command(&text) {
                                     let _ = cmd_tx.send(cmd);
                                 } else if let Some(room_id) = app.selected_room_id() {
+                                    if app.selected_room_is_invited() {
+                                        continue;
+                                    }
                                     let _ = cmd_tx.send(MatrixCommand::SendMessage { room_id, body: text });
                                 }
                             }

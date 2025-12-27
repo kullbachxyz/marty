@@ -18,10 +18,18 @@ use std::sync::Arc;
 use crate::config::AccountConfig;
 use crate::storage::{append_message, StoredMessage};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomListState {
+    Joined,
+    Invited,
+}
+
 #[derive(Debug, Clone)]
 pub struct RoomInfo {
     pub room_id: String,
     pub name: String,
+    pub state: RoomListState,
+    pub inviter: Option<String>,
 }
 
 #[derive(Debug)]
@@ -52,6 +60,8 @@ pub enum MatrixCommand {
     JoinRoom { room: String },
     CreateDirect { user_id: String },
     LeaveRoom { room_id: String },
+    AcceptInvite { room_id: String },
+    RejectInvite { room_id: String },
     StartVerification,
     ConfirmVerification,
     CancelVerification,
@@ -184,6 +194,22 @@ pub async fn start_sync(
                     }
                 }
             }
+            MatrixCommand::AcceptInvite { room_id } => {
+                if let Ok(room_id) = RoomId::parse(&room_id) {
+                    if let Some(room) = client.get_room(&room_id) {
+                        let _ = room.join().await;
+                        publish_rooms(&client, &evt_tx).await;
+                    }
+                }
+            }
+            MatrixCommand::RejectInvite { room_id } => {
+                if let Ok(room_id) = RoomId::parse(&room_id) {
+                    if let Some(room) = client.get_room(&room_id) {
+                        let _ = room.leave().await;
+                        publish_rooms(&client, &evt_tx).await;
+                    }
+                }
+            }
             MatrixCommand::StartVerification => {
                 let Some(user_id) = client.user_id() else { continue };
                 if let Ok(Some(user)) = client.encryption().get_user_identity(user_id).await {
@@ -257,9 +283,10 @@ pub async fn start_sync(
 }
 
 async fn publish_rooms(client: &Client, evt_tx: &mpsc::UnboundedSender<MatrixEvent>) {
-    let rooms = client.joined_rooms();
+    let joined_rooms = client.joined_rooms();
+    let invited_rooms = client.invited_rooms();
     let mut room_infos = Vec::new();
-    for room in rooms {
+    for room in joined_rooms {
         let room_id = room.room_id().to_string();
         let name = match room.display_name().await {
             Ok(DisplayName::Empty) | Ok(DisplayName::EmptyWas(_)) => {
@@ -268,7 +295,40 @@ async fn publish_rooms(client: &Client, evt_tx: &mpsc::UnboundedSender<MatrixEve
             Ok(name) => name.to_string(),
             Err(_) => resolve_room_name(client, &room, &room_id).await,
         };
-        room_infos.push(RoomInfo { room_id, name });
+        room_infos.push(RoomInfo {
+            room_id,
+            name,
+            state: RoomListState::Joined,
+            inviter: None,
+        });
+    }
+    for room in invited_rooms {
+        let room_id = room.room_id().to_string();
+        let inviter = room
+            .invite_details()
+            .await
+            .ok()
+            .and_then(|invite| invite.inviter)
+            .map(|inviter| inviter.name().to_string())
+            .filter(|name| !name.is_empty());
+        let name = match room.display_name().await {
+            Ok(DisplayName::Empty) | Ok(DisplayName::EmptyWas(_)) => {
+                resolve_room_name(client, &room, &room_id).await
+            }
+            Ok(name) => name.to_string(),
+            Err(_) => resolve_room_name(client, &room, &room_id).await,
+        };
+        let name = if (name == room_id || name == "Empty Room") && inviter.is_some() {
+            inviter.clone().unwrap_or(name)
+        } else {
+            name
+        };
+        room_infos.push(RoomInfo {
+            room_id,
+            name,
+            state: RoomListState::Invited,
+            inviter,
+        });
     }
     let _ = evt_tx.send(MatrixEvent::Rooms(room_infos));
 }
