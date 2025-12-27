@@ -6,7 +6,6 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
-use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -60,11 +59,6 @@ enum MessageItem {
         name: String,
         text: String,
     },
-    Image {
-        time: String,
-        name: String,
-        path: String,
-    },
 }
 
 struct App {
@@ -81,7 +75,6 @@ struct App {
     verification_until: Option<Instant>,
     help_open: bool,
     help_scroll: u16,
-    media_dir: PathBuf,
     is_syncing: bool,
     should_quit: bool,
 }
@@ -102,7 +95,6 @@ impl App {
             verification_until: None,
             help_open: false,
             help_scroll: 0,
-            media_dir: ensure_media_dir(),
             is_syncing: true,
             should_quit: false,
         }
@@ -266,17 +258,6 @@ impl App {
         self.help_scroll = (self.help_scroll + 1).min(max);
     }
 
-    fn resolve_selected_image_path(&self) -> Option<PathBuf> {
-        let idx = self.message_selected?;
-        let messages = self.current_messages()?;
-        match messages.get(idx) {
-            Some(MessageItem::Image { path, .. }) => {
-                Some(resolve_media_path(path, &self.media_dir))
-            }
-            _ => None,
-        }
-    }
-
     fn selected_room_id(&self) -> Option<String> {
         self.rooms.get(self.selected).map(|room| room.room_id.clone())
     }
@@ -383,9 +364,6 @@ fn msg_string(item: &MessageItem) -> String {
         MessageItem::Message { time, name, text } => {
             format!("{} {}: {}", time, name, text)
         }
-        MessageItem::Image { time, name, path } => {
-            format!("{} {}: [image] {}", time, name, path)
-        }
     }
 }
 
@@ -420,11 +398,6 @@ fn render_messages_area(
             }
             MessageItem::Message { time, name, text } => {
                 let spans = message_spans(time, name, text);
-                draw_spans_line(buf, inner, y, &spans, selected);
-                y = y.saturating_add(1);
-            }
-            MessageItem::Image { time, name, path } => {
-                let spans = message_spans(time, name, &format!("[image] {}", path));
                 draw_spans_line(buf, inner, y, &spans, selected);
                 y = y.saturating_add(1);
             }
@@ -544,24 +517,6 @@ fn copy_with_wl_copy(text: &str) -> bool {
     false
 }
 
-fn resolve_media_path(path: &str, media_dir: &Path) -> PathBuf {
-    let candidate = Path::new(path);
-    if candidate.is_absolute() || candidate.exists() {
-        return candidate.to_path_buf();
-    }
-    media_dir.join(path)
-}
-
-fn ensure_media_dir() -> PathBuf {
-    let date = Local::now().format("%Y-%m-%d").to_string();
-    let base = env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."));
-    let dir = base.join(".local/share/marty").join(date);
-    let _ = std::fs::create_dir_all(&dir);
-    dir
-}
-
 fn extract_url(text: &str) -> Option<String> {
     for part in text.split_whitespace() {
         if part.starts_with("http://") || part.starts_with("https://") {
@@ -569,24 +524,6 @@ fn extract_url(text: &str) -> Option<String> {
         }
     }
     None
-}
-
-fn open_path(path: &Path) -> bool {
-    #[cfg(target_os = "windows")]
-    {
-        return Command::new("cmd")
-            .args(["/C", "start", "", &path.display().to_string()])
-            .spawn()
-            .is_ok();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        return Command::new("open").arg(path).spawn().is_ok();
-    }
-    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
-    {
-        return Command::new("xdg-open").arg(path).spawn().is_ok();
-    }
 }
 
 fn open_url(url: &str) -> bool {
@@ -894,11 +831,7 @@ fn run_app(
                         }
                         KeyCode::Enter => {
                             if app.input.trim().is_empty() {
-                                if let Some(path) = app.resolve_selected_image_path() {
-                                    let _ = open_path(&path);
-                                } else {
-                                    app.on_open_url();
-                                }
+                                app.on_open_url();
                             } else if let Some(text) = app.on_enter() {
                                 if let Some(cmd) = parse_command(&text) {
                                     let _ = cmd_tx.send(cmd);

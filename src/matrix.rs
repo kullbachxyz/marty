@@ -71,17 +71,6 @@ pub async fn build_client(homeserver: &str, passphrase: &str) -> Result<Client> 
         .context("create matrix client")
 }
 
-pub async fn login(
-    homeserver: &str,
-    username: &str,
-    password: &str,
-    passphrase: &str,
-) -> Result<(Client, AccountConfig)> {
-    let client = build_client(homeserver, passphrase).await?;
-    let account = login_with_client(&client, homeserver, username, password).await?;
-    Ok((client, account))
-}
-
 pub async fn login_with_client(
     client: &Client,
     homeserver: &str,
