@@ -305,19 +305,7 @@ impl App {
             if let Some(messages) = self.messages_by_channel.get_mut(self.selected) {
                 if let Some(msg) = messages.get(idx) {
                     let text = msg_string(msg);
-                    if copy_to_clipboard(&text) {
-                        messages.push(MessageItem::Message {
-                            time: "19:06".to_string(),
-                            name: "System".to_string(),
-                            text: "Copied to clipboard.".to_string(),
-                        });
-                    } else {
-                        messages.push(MessageItem::Message {
-                            time: "19:06".to_string(),
-                            name: "System".to_string(),
-                            text: format!("Clipboard failed, copied locally: {}", text),
-                        });
-                    }
+                    let _ = copy_to_clipboard(&text);
                 }
             }
         }
@@ -328,13 +316,8 @@ impl App {
             if let Some(messages) = self.messages_by_channel.get_mut(self.selected) {
                 if let Some(msg) = messages.get(idx) {
                     let msg_text = msg_string(msg);
-                    if let Some(start) = msg_text.find("http") {
-                        let url = &msg_text[start..];
-                        messages.push(MessageItem::Message {
-                            time: "19:06".to_string(),
-                            name: "System".to_string(),
-                            text: format!("Open URL (stub): {}", url),
-                        });
+                    if let Some(url) = extract_url(&msg_text) {
+                        let _ = open_url(&url);
                     }
                 }
             }
@@ -425,6 +408,33 @@ fn copy_with_wl_copy(text: &str) -> bool {
         return child.wait().is_ok();
     }
     false
+}
+
+fn extract_url(text: &str) -> Option<String> {
+    for part in text.split_whitespace() {
+        if part.starts_with("http://") || part.starts_with("https://") {
+            return Some(part.trim_end_matches(|c: char| c == ')' || c == ',' || c == '.').to_string());
+        }
+    }
+    None
+}
+
+fn open_url(url: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        return Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+            .is_ok();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return Command::new("open").arg(url).spawn().is_ok();
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        return Command::new("xdg-open").arg(url).spawn().is_ok();
+    }
 }
 
 fn main() -> Result<(), io::Error> {
