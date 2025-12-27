@@ -85,6 +85,9 @@ struct App {
     messages_by_room: HashMap<String, Vec<MessageItem>>,
     last_date_by_room: HashMap<String, String>,
     seen_event_ids: HashMap<String, HashSet<String>>,
+    last_message_ts: HashMap<String, i64>,
+    last_seen_ts: HashMap<String, i64>,
+    unread_counts: HashMap<String, usize>,
     message_selected: Option<usize>,
     input: String,
     prompt: Option<PromptState>,
@@ -105,6 +108,9 @@ impl App {
             messages_by_room: HashMap::new(),
             last_date_by_room: HashMap::new(),
             seen_event_ids: HashMap::new(),
+            last_message_ts: HashMap::new(),
+            last_seen_ts: HashMap::new(),
+            unread_counts: HashMap::new(),
             message_selected: None,
             input: String::new(),
             prompt: None,
@@ -122,6 +128,9 @@ impl App {
         if self.selected > 0 {
             self.selected -= 1;
             self.message_selected = None;
+            if let Some(room_id) = self.rooms.get(self.selected).map(|room| room.room_id.clone()) {
+                self.mark_room_read(&room_id);
+            }
         }
     }
 
@@ -129,6 +138,9 @@ impl App {
         if self.selected + 1 < self.rooms.len() {
             self.selected += 1;
             self.message_selected = None;
+            if let Some(room_id) = self.rooms.get(self.selected).map(|room| room.room_id.clone()) {
+                self.mark_room_read(&room_id);
+            }
         }
     }
 
@@ -339,11 +351,48 @@ impl App {
             self.seen_event_ids
                 .entry(room.room_id.clone())
                 .or_default();
+            self.unread_counts.entry(room.room_id.clone()).or_default();
+            self.last_seen_ts.entry(room.room_id.clone()).or_default();
+            self.last_message_ts.entry(room.room_id.clone()).or_default();
         }
         self.rooms = rooms;
         self.selected = 0;
         self.message_selected = None;
         self.is_syncing = false;
+        if let Some(room_id) = self.rooms.get(self.selected).map(|room| room.room_id.clone()) {
+            self.mark_room_read(&room_id);
+        }
+    }
+
+    fn handle_incoming_message(
+        &mut self,
+        room_id: &str,
+        event_id: Option<&str>,
+        ts: i64,
+        sender: &str,
+        body: &str,
+    ) {
+        let is_selected = self
+            .selected_room_id()
+            .as_deref()
+            .map(|id| id == room_id)
+            .unwrap_or(false);
+        let last_seen = *self.last_seen_ts.get(room_id).unwrap_or(&0);
+        if !is_selected && ts > last_seen {
+            let entry = self.unread_counts.entry(room_id.to_string()).or_default();
+            *entry = entry.saturating_add(1);
+        }
+        self.push_message_with_time(room_id, event_id, ts, sender, body);
+        if is_selected {
+            self.mark_room_read(room_id);
+        }
+    }
+
+    fn mark_room_read(&mut self, room_id: &str) {
+        if let Some(ts) = self.last_message_ts.get(room_id).copied() {
+            self.last_seen_ts.insert(room_id.to_string(), ts);
+        }
+        self.unread_counts.insert(room_id.to_string(), 0);
     }
 
     fn push_message_with_time(
@@ -372,6 +421,8 @@ impl App {
             name: format_sender(sender),
             text: body.to_string(),
         });
+        self.last_message_ts
+            .insert(room_id.to_string(), ts);
     }
 }
 
@@ -718,6 +769,9 @@ fn run_app(
                     );
                 }
             }
+            for (room_id, ts) in app.last_message_ts.clone() {
+                app.last_seen_ts.entry(room_id).or_insert(ts);
+            }
         }
     }
 
@@ -732,7 +786,13 @@ fn run_app(
                     body,
                     timestamp,
                 } => {
-                    app.push_message_with_time(&room_id, Some(&event_id), timestamp, &sender, &body);
+                    app.handle_incoming_message(
+                        &room_id,
+                        Some(&event_id),
+                        timestamp,
+                        &sender,
+                        &body,
+                    );
                 }
                 MatrixEvent::VerificationEmojis { emojis } => {
                     app.show_verification_emojis(emojis);
@@ -789,7 +849,18 @@ fn run_app(
                         } else {
                             room.name.clone()
                         };
-                        ListItem::new(Line::from(Span::raw(label)))
+                        let unread = *app.unread_counts.get(&room.room_id).unwrap_or(&0);
+                        let display = if unread > 0 {
+                            format!("{} [{}]", label, unread)
+                        } else {
+                            label
+                        };
+                        let style = if unread > 0 {
+                            Style::default().add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default()
+                        };
+                        ListItem::new(Line::from(Span::styled(display, style)))
                     })
                     .collect();
 
