@@ -2,7 +2,10 @@
         f1 Toggle help panel showing shortcuts.
         Up One Channel Up
         Down One Channel Down
+        Alt+A Add chat (room or user).
     Message input
+        /join <#alias|!id> Join a room.
+        /dm <@user:server> Start a direct message.
         enter when input box empty in single-line mode Open URL from selected message.
         enter otherwise Send message.
     Message/channel selection
@@ -15,4 +18,3 @@
         esc Close help panel.
          Up Previous line
          Down PgDown Next line
-

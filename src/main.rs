@@ -1,11 +1,16 @@
+mod config;
+mod matrix;
+
+use std::collections::HashMap;
 use std::env;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
+use anyhow::Result;
 use arboard::Clipboard;
-use chrono::Local;
+use chrono::{Local, TimeZone};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
@@ -16,14 +21,22 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Terminal;
+use rpassword::read_password;
+use tokio::sync::mpsc;
+
+use crate::config::{config_path, data_dir, load_config, save_config};
+use crate::matrix::{build_client, login, start_sync, MatrixCommand, MatrixEvent, RoomInfo};
 
 const TICK_RATE: Duration = Duration::from_millis(100);
-const HELP_LINES: [&str; 15] = [
+const HELP_LINES: [&str; 18] = [
     "App navigation",
     "  F1 Toggle help panel showing shortcuts.",
     "  Up One Channel Up",
     "  Down One Channel Down",
+    "  Alt+A Add chat (room or user).",
     "Message input",
+    "  /join <#alias|!id> Join a room.",
+    "  /dm <@user:server> Start a direct message.",
     "  Enter when input box empty in single-line mode Open URL from selected message.",
     "  Enter otherwise Send message.",
     "Message/channel selection",
@@ -52,176 +65,34 @@ enum MessageItem {
 }
 
 struct App {
-    channels: Vec<String>,
+    rooms: Vec<RoomInfo>,
     selected: usize,
-    messages_by_channel: Vec<Vec<MessageItem>>,
+    messages_by_room: HashMap<String, Vec<MessageItem>>,
+    last_date_by_room: HashMap<String, String>,
     message_selected: Option<usize>,
     input: String,
+    add_prompt: Option<String>,
     help_open: bool,
     help_scroll: u16,
-    reply_idx: usize,
     media_dir: PathBuf,
+    is_syncing: bool,
     should_quit: bool,
 }
 
 impl App {
     fn new() -> Self {
         Self {
-            channels: vec![
-                "Melanie".to_string(),
-                "Nullinger0".to_string(),
-                "1994".to_string(),
-                "Lido Melphi Tours".to_string(),
-                "Philipp".to_string(),
-                "Arlene".to_string(),
-                "Dominik".to_string(),
-                "Lisa".to_string(),
-            ],
+            rooms: Vec::new(),
             selected: 0,
-            messages_by_channel: vec![
-                vec![
-                    MessageItem::Separator("Monday, 12/15/25".to_string()),
-                    MessageItem::Message {
-                        time: "14:26".to_string(),
-                        name: "Philipp".to_string(),
-                        text: "Hallo".to_string(),
-                    },
-                    MessageItem::Message {
-                        time: "14:26".to_string(),
-                        name: "Philipp".to_string(),
-                        text: "wann kommst du nochmal heim?".to_string(),
-                    },
-                    MessageItem::Message {
-                        time: "14:26".to_string(),
-                        name: "Philipp".to_string(),
-                        text: "ich habs vergessen sorry".to_string(),
-                    },
-                    MessageItem::Message {
-                        time: "14:28".to_string(),
-                        name: "Melanie".to_string(),
-                        text: "Spat. Ich schatze 18 Uhr etwa".to_string(),
-                    },
-                    MessageItem::Message {
-                        time: "14:30".to_string(),
-                        name: "Philipp".to_string(),
-                        text: "okay".to_string(),
-                    },
-                    MessageItem::Separator("Tuesday, 12/16/25".to_string()),
-                    MessageItem::Message {
-                        time: "09:49".to_string(),
-                        name: "Philipp".to_string(),
-                        text: "Danke!".to_string(),
-                    },
-                    MessageItem::Separator("Wednesday, 12/17/25".to_string()),
-                    MessageItem::Message {
-                        time: "18:50".to_string(),
-                        name: "Philipp".to_string(),
-                        text: "Hallo! :-)".to_string(),
-                    },
-                ],
-                vec![
-                    MessageItem::Separator("Friday, 12/12/25".to_string()),
-                    MessageItem::Message {
-                        time: "10:02".to_string(),
-                        name: "Nullinger0".to_string(),
-                        text: "build logs look clean.".to_string(),
-                    },
-                    MessageItem::Message {
-                        time: "10:14".to_string(),
-                        name: "Nullinger0".to_string(),
-                        text: "F1 opens the shortcuts panel.".to_string(),
-                    },
-                ],
-                vec![
-                    MessageItem::Separator("Thursday, 12/11/25".to_string()),
-                    MessageItem::Message {
-                        time: "21:05".to_string(),
-                        name: "1994".to_string(),
-                        text: "archival notes live here.".to_string(),
-                    },
-                    MessageItem::Message {
-                        time: "21:06".to_string(),
-                        name: "1994".to_string(),
-                        text: "https://matrix.org has docs and specs.".to_string(),
-                    },
-                ],
-                vec![
-                    MessageItem::Separator("Saturday, 12/20/25".to_string()),
-                    MessageItem::Message {
-                        time: "08:30".to_string(),
-                        name: "Lido Melphi Tours".to_string(),
-                        text: "itinerary finalized.".to_string(),
-                    },
-                    MessageItem::Message {
-                        time: "09:10".to_string(),
-                        name: "Lido Melphi Tours".to_string(),
-                        text: "confirm ticket status.".to_string(),
-                    },
-                ],
-                vec![
-                    MessageItem::Separator("Wednesday, 12/17/25".to_string()),
-                    MessageItem::Message {
-                        time: "16:02".to_string(),
-                        name: "Philipp".to_string(),
-                        text: "This mirrors the gurk-rs layout.".to_string(),
-                    },
-                    MessageItem::Message {
-                        time: "16:03".to_string(),
-                        name: "Philipp".to_string(),
-                        text: "keys are in keybinds.md.".to_string(),
-                    },
-                    MessageItem::Image {
-                        time: "16:05".to_string(),
-                        name: "Philipp".to_string(),
-                        path: "qr.png".to_string(),
-                    },
-                ],
-                vec![
-                    MessageItem::Separator("Tuesday, 12/16/25".to_string()),
-                    MessageItem::Message {
-                        time: "12:01".to_string(),
-                        name: "Arlene".to_string(),
-                        text: "Press Enter on empty input to open a URL (stub).".to_string(),
-                    },
-                    MessageItem::Message {
-                        time: "12:02".to_string(),
-                        name: "Arlene".to_string(),
-                        text: "Alt+Y copies the selected line (stub).".to_string(),
-                    },
-                ],
-                vec![
-                    MessageItem::Separator("Monday, 12/15/25".to_string()),
-                    MessageItem::Message {
-                        time: "18:12".to_string(),
-                        name: "Dominik".to_string(),
-                        text: "Selection highlights in the messages list.".to_string(),
-                    },
-                    MessageItem::Message {
-                        time: "18:13".to_string(),
-                        name: "Dominik".to_string(),
-                        text: "Esc resets selection.".to_string(),
-                    },
-                ],
-                vec![
-                    MessageItem::Separator("Friday, 12/12/25".to_string()),
-                    MessageItem::Message {
-                        time: "17:44".to_string(),
-                        name: "Lisa".to_string(),
-                        text: "UI polish looks great.".to_string(),
-                    },
-                    MessageItem::Message {
-                        time: "17:45".to_string(),
-                        name: "Lisa".to_string(),
-                        text: "Try sending a test line.".to_string(),
-                    },
-                ],
-            ],
+            messages_by_room: HashMap::new(),
+            last_date_by_room: HashMap::new(),
             message_selected: None,
             input: String::new(),
+            add_prompt: None,
             help_open: false,
             help_scroll: 0,
-            reply_idx: 0,
             media_dir: ensure_media_dir(),
+            is_syncing: true,
             should_quit: false,
         }
     }
@@ -234,38 +105,19 @@ impl App {
     }
 
     fn on_down(&mut self) {
-        if self.selected + 1 < self.channels.len() {
+        if self.selected + 1 < self.rooms.len() {
             self.selected += 1;
             self.message_selected = None;
         }
     }
 
-    fn on_enter(&mut self) {
+    fn on_enter(&mut self) -> Option<String> {
         if !self.input.trim().is_empty() {
-            let msg = MessageItem::Message {
-                time: "19:02".to_string(),
-                name: "You".to_string(),
-                text: self.input.trim_end().to_string(),
-            };
-            if let Some(messages) = self.messages_by_channel.get_mut(self.selected) {
-                messages.push(msg);
-                let replies = [
-                    ("19:03", "Bot", "Got it."),
-                    ("19:03", "Bot", "Sounds good."),
-                    ("19:04", "Bot", "Acknowledged."),
-                    ("19:04", "Bot", "Let me check on that."),
-                    ("19:05", "Bot", "Thanks for the update."),
-                ];
-                let reply = replies[self.reply_idx % replies.len()];
-                self.reply_idx = self.reply_idx.wrapping_add(1);
-                messages.push(MessageItem::Message {
-                    time: reply.0.to_string(),
-                    name: reply.1.to_string(),
-                    text: reply.2.to_string(),
-                });
-            }
+            let text = self.input.trim_end().to_string();
             self.input.clear();
+            return Some(text);
         }
+        None
     }
 
     fn toggle_help(&mut self) {
@@ -273,6 +125,42 @@ impl App {
         if self.help_open {
             self.help_scroll = 0;
         }
+    }
+
+    fn start_add_prompt(&mut self) {
+        self.add_prompt = Some(String::new());
+    }
+
+    fn cancel_add_prompt(&mut self) {
+        self.add_prompt = None;
+    }
+
+    fn add_prompt_backspace(&mut self) {
+        if let Some(input) = self.add_prompt.as_mut() {
+            input.pop();
+        }
+    }
+
+    fn add_prompt_push(&mut self, c: char) {
+        if let Some(input) = self.add_prompt.as_mut() {
+            input.push(c);
+        }
+    }
+
+    fn submit_add_prompt(&mut self) -> Option<MatrixCommand> {
+        let input = self.add_prompt.take()?;
+        let trimmed = input.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        if trimmed.starts_with('@') {
+            return Some(MatrixCommand::CreateDirect {
+                user_id: trimmed.to_string(),
+            });
+        }
+        Some(MatrixCommand::JoinRoom {
+            room: trimmed.to_string(),
+        })
     }
 
     fn on_escape(&mut self) {
@@ -284,7 +172,7 @@ impl App {
     }
 
     fn on_message_up(&mut self) {
-        let Some(messages) = self.messages_by_channel.get(self.selected) else {
+        let Some(messages) = self.current_messages() else {
             return;
         };
         if messages.is_empty() {
@@ -297,7 +185,7 @@ impl App {
     }
 
     fn on_message_down(&mut self) {
-        let Some(messages) = self.messages_by_channel.get(self.selected) else {
+        let Some(messages) = self.current_messages() else {
             return;
         };
         if messages.is_empty() {
@@ -317,7 +205,7 @@ impl App {
 
     fn on_copy_message(&mut self) {
         if let Some(idx) = self.message_selected {
-            if let Some(messages) = self.messages_by_channel.get_mut(self.selected) {
+            if let Some(messages) = self.current_messages_mut() {
                 if let Some(msg) = messages.get(idx) {
                     let text = msg_string(msg);
                     let _ = copy_to_clipboard(&text);
@@ -328,7 +216,7 @@ impl App {
 
     fn on_open_url(&mut self) {
         if let Some(idx) = self.message_selected {
-            if let Some(messages) = self.messages_by_channel.get_mut(self.selected) {
+            if let Some(messages) = self.current_messages_mut() {
                 if let Some(msg) = messages.get(idx) {
                     let msg_text = msg_string(msg);
                     if let Some(url) = extract_url(&msg_text) {
@@ -350,7 +238,7 @@ impl App {
 
     fn resolve_selected_image_path(&self) -> Option<PathBuf> {
         let idx = self.message_selected?;
-        let messages = self.messages_by_channel.get(self.selected)?;
+        let messages = self.current_messages()?;
         match messages.get(idx) {
             Some(MessageItem::Image { path, .. }) => {
                 Some(resolve_media_path(path, &self.media_dir))
@@ -358,6 +246,106 @@ impl App {
             _ => None,
         }
     }
+
+    fn selected_room_id(&self) -> Option<String> {
+        self.rooms.get(self.selected).map(|room| room.room_id.clone())
+    }
+
+    fn current_messages(&self) -> Option<&Vec<MessageItem>> {
+        let room_id = self.selected_room_id()?;
+        self.messages_by_room.get(&room_id)
+    }
+
+    fn current_messages_mut(&mut self) -> Option<&mut Vec<MessageItem>> {
+        let room_id = self.selected_room_id()?;
+        self.messages_by_room.get_mut(&room_id)
+    }
+
+    fn update_rooms(&mut self, rooms: Vec<RoomInfo>) {
+        for room in &rooms {
+            self.messages_by_room
+                .entry(room.room_id.clone())
+                .or_default();
+        }
+        self.rooms = rooms;
+        self.selected = 0;
+        self.message_selected = None;
+        self.is_syncing = false;
+    }
+
+    fn push_message_with_time(&mut self, room_id: &str, ts: i64, sender: &str, body: &str) {
+        let date = format_date(ts);
+        let entry = self.messages_by_room.entry(room_id.to_string()).or_default();
+        let last_date = self.last_date_by_room.entry(room_id.to_string()).or_default();
+        if last_date != &date {
+            entry.push(MessageItem::Separator(date.clone()));
+            *last_date = date;
+        }
+        entry.push(MessageItem::Message {
+            time: format_timestamp(ts),
+            name: format_sender(sender),
+            text: body.to_string(),
+        });
+    }
+}
+
+fn format_timestamp(ts: i64) -> String {
+    Local
+        .timestamp_millis_opt(ts)
+        .single()
+        .unwrap_or_else(Local::now)
+        .format("%H:%M")
+        .to_string()
+}
+
+fn format_date(ts: i64) -> String {
+    Local
+        .timestamp_millis_opt(ts)
+        .single()
+        .unwrap_or_else(Local::now)
+        .format("%A, %m/%d/%y")
+        .to_string()
+}
+
+fn format_sender(sender: &str) -> String {
+    let trimmed = sender.trim_start_matches('@');
+    trimmed.split(':').next().unwrap_or(trimmed).to_string()
+}
+
+fn parse_command(text: &str) -> Option<MatrixCommand> {
+    let trimmed = text.trim();
+    if let Some(rest) = trimmed.strip_prefix("/join ") {
+        let room = rest.trim();
+        if !room.is_empty() {
+            return Some(MatrixCommand::JoinRoom {
+                room: room.to_string(),
+            });
+        }
+    }
+    if let Some(rest) = trimmed.strip_prefix("/dm ") {
+        let user_id = rest.trim();
+        if !user_id.is_empty() {
+            return Some(MatrixCommand::CreateDirect {
+                user_id: user_id.to_string(),
+            });
+        }
+    }
+    None
+}
+
+fn prompt(label: &str) -> io::Result<String> {
+    print!("{}", label);
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    Ok(input.trim().to_string())
+}
+
+fn prompt_password(label: &str) -> io::Result<String> {
+    print!("{}", label);
+    io::stdout().flush()?;
+    let password = read_password().unwrap_or_default();
+    Ok(password)
 }
 
 fn msg_string(item: &MessageItem) -> String {
@@ -384,8 +372,7 @@ fn render_messages_area(
         return;
     }
     let messages = app
-        .messages_by_channel
-        .get(app.selected)
+        .current_messages()
         .map(|items| items.as_slice())
         .unwrap_or(&[]);
     let buf = f.buffer_mut();
@@ -591,27 +578,92 @@ fn open_url(url: &str) -> bool {
     }
 }
 
-fn main() -> Result<(), io::Error> {
+#[tokio::main]
+async fn main() -> Result<()> {
+    let config_file = config_path()?;
+    let mut cfg = load_config(&config_file)?;
+
+    let account = if cfg.accounts.is_empty() {
+        let homeserver = prompt("Homeserver URL: ")?;
+        let username = prompt("Username: ")?;
+        let password = prompt_password("Password: ")?;
+        let (client, account) = login(&homeserver, &username, &password).await?;
+        cfg.accounts.push(account.clone());
+        cfg.active = Some(0);
+        save_config(&config_file, &cfg)?;
+        return start_matrix(client, data_dir()?).await;
+    } else {
+        let idx = cfg.active.unwrap_or(0).min(cfg.accounts.len().saturating_sub(1));
+        cfg.accounts[idx].clone()
+    };
+
+    let client = if let Some(session) = account.session.clone() {
+        let client = build_client(&account.homeserver).await?;
+        if client.restore_session(session).await.is_ok() {
+            client
+        } else {
+            let password = prompt_password("Password: ")?;
+            let (client, updated) = login(&account.homeserver, &account.username, &password).await?;
+            update_account_session(&mut cfg, &updated);
+            save_config(&config_file, &cfg)?;
+            client
+        }
+    } else {
+        let password = prompt_password("Password: ")?;
+        let (client, updated) = login(&account.homeserver, &account.username, &password).await?;
+        update_account_session(&mut cfg, &updated);
+        save_config(&config_file, &cfg)?;
+        client
+    };
+
+    start_matrix(client, data_dir()?).await
+}
+
+async fn start_matrix(client: matrix_sdk::Client, data_root: PathBuf) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let res = run_app(&mut terminal);
+    let (evt_tx, evt_rx) = mpsc::unbounded_channel();
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+
+    tokio::spawn(start_sync(client, data_root, cmd_rx, evt_tx));
+
+    let res = run_app(&mut terminal, evt_rx, cmd_tx);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
 
-    res
+    res?;
+    Ok(())
 }
 
-fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<()> {
+fn run_app(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    mut evt_rx: mpsc::UnboundedReceiver<MatrixEvent>,
+    cmd_tx: mpsc::UnboundedSender<MatrixCommand>,
+) -> io::Result<()> {
     let mut app = App::new();
     let mut last_tick = Instant::now();
 
     loop {
+        while let Ok(evt) = evt_rx.try_recv() {
+            match evt {
+                MatrixEvent::Rooms(rooms) => app.update_rooms(rooms),
+                MatrixEvent::Message {
+                    room_id,
+                    sender,
+                    body,
+                    timestamp,
+                } => {
+                    app.push_message_with_time(&room_id, timestamp, &sender, &body);
+                }
+            }
+        }
+
         terminal.draw(|f| {
             let size = f.size();
 
@@ -637,13 +689,15 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                     .split(main_chunks[1]);
 
                 let channels: Vec<ListItem> = app
-                    .channels
+                    .rooms
                     .iter()
-                    .map(|c| ListItem::new(Line::from(Span::raw(c))))
+                    .map(|room| ListItem::new(Line::from(Span::raw(&room.name))))
                     .collect();
 
                 let mut list_state = ListState::default();
-                list_state.select(Some(app.selected));
+                if !app.rooms.is_empty() {
+                    list_state.select(Some(app.selected));
+                }
 
                 let channels_list = List::new(channels)
                     .block(Block::default().borders(Borders::ALL).title("Channels"))
@@ -668,6 +722,13 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                 let cursor_x = x + (app.input.len().min(max_width) as u16);
                 f.set_cursor(cursor_x, y);
             }
+
+            if let Some(ref prompt) = app.add_prompt {
+                render_add_prompt(f, size, prompt);
+            }
+            if app.is_syncing && !app.help_open {
+                render_sync_indicator(f, size);
+            }
         })?;
 
         let timeout = TICK_RATE
@@ -676,10 +737,27 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
+                    if app.add_prompt.is_some() {
+                        match key.code {
+                            KeyCode::Esc => app.cancel_add_prompt(),
+                            KeyCode::Enter => {
+                                if let Some(cmd) = app.submit_add_prompt() {
+                                    let _ = cmd_tx.send(cmd);
+                                }
+                            }
+                            KeyCode::Backspace => app.add_prompt_backspace(),
+                            KeyCode::Char(c) => app.add_prompt_push(c),
+                            _ => {}
+                        }
+                        continue;
+                    }
                     match key.code {
                         KeyCode::Char('q') => app.should_quit = true,
                         KeyCode::F(1) => app.toggle_help(),
                         KeyCode::Esc => app.on_escape(),
+                        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::ALT) => {
+                            app.start_add_prompt();
+                        }
                         KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => {
                             app.on_message_up()
                         }
@@ -717,8 +795,12 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
                                 } else {
                                     app.on_open_url();
                                 }
-                            } else {
-                                app.on_enter();
+                            } else if let Some(text) = app.on_enter() {
+                                if let Some(cmd) = parse_command(&text) {
+                                    let _ = cmd_tx.send(cmd);
+                                } else if let Some(room_id) = app.selected_room_id() {
+                                    let _ = cmd_tx.send(MatrixCommand::SendMessage { room_id, body: text });
+                                }
                             }
                         }
                         KeyCode::Char('y') if key.modifiers.contains(KeyModifiers::ALT) => {
@@ -744,4 +826,47 @@ fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) -> io::Result<
             return Ok(());
         }
     }
+}
+
+fn update_account_session(cfg: &mut config::AppConfig, updated: &config::AccountConfig) {
+    if let Some(idx) = cfg.active {
+        if let Some(existing) = cfg.accounts.get_mut(idx) {
+            existing.session = updated.session.clone();
+            existing.user_id = updated.user_id.clone();
+            return;
+        }
+    }
+    cfg.accounts.push(updated.clone());
+    cfg.active = Some(0);
+}
+
+fn render_add_prompt(f: &mut ratatui::Frame, area: Rect, input: &str) {
+    let popup = centered_rect(60, 3, area);
+    let block = Block::default().borders(Borders::ALL).title("Add chat (@user or #room)");
+    f.render_widget(&block, popup);
+    let inner = block.inner(popup);
+    let text = Paragraph::new(input);
+    f.render_widget(text, inner);
+    let x = inner.x + (input.len().min(inner.width as usize) as u16);
+    f.set_cursor(x, inner.y);
+}
+
+fn render_sync_indicator(f: &mut ratatui::Frame, area: Rect) {
+    let width = 18;
+    let height = 3;
+    let x = area.x + area.width.saturating_sub(width) - 1;
+    let y = area.y + 1;
+    let rect = Rect { x, y, width, height };
+    let block = Block::default().borders(Borders::ALL).title("Sync");
+    f.render_widget(&block, rect);
+    let inner = block.inner(rect);
+    let text = Paragraph::new("Syncing...");
+    f.render_widget(text, inner);
+}
+
+fn centered_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
+    let width = area.width.saturating_mul(percent_x) / 100;
+    let x = area.x + (area.width.saturating_sub(width) / 2);
+    let y = area.y + (area.height.saturating_sub(height) / 2);
+    Rect { x, y, width, height }
 }
