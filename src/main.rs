@@ -2,7 +2,7 @@ mod config;
 mod matrix;
 mod storage;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
@@ -26,8 +26,9 @@ use ratatui::Terminal;
 use rpassword::read_password;
 use tokio::sync::mpsc;
 
-use crate::config::{config_path, crypto_dir, load_config, save_config};
-use crate::matrix::{build_client, login, login_with_client, start_sync, MatrixCommand, MatrixEvent, RoomInfo};
+use crate::config::{config_path, crypto_dir, load_config, messages_dir, save_config};
+use crate::matrix::{build_client, login_with_client, start_sync, MatrixCommand, MatrixEvent, RoomInfo};
+use crate::storage::load_all_messages;
 
 const TICK_RATE: Duration = Duration::from_millis(100);
 const HELP_LINES: [&str; 18] = [
@@ -71,6 +72,7 @@ struct App {
     selected: usize,
     messages_by_room: HashMap<String, Vec<MessageItem>>,
     last_date_by_room: HashMap<String, String>,
+    seen_event_ids: HashMap<String, HashSet<String>>,
     message_selected: Option<usize>,
     input: String,
     add_prompt: Option<String>,
@@ -91,6 +93,7 @@ impl App {
             selected: 0,
             messages_by_room: HashMap::new(),
             last_date_by_room: HashMap::new(),
+            seen_event_ids: HashMap::new(),
             message_selected: None,
             input: String::new(),
             add_prompt: None,
@@ -293,6 +296,9 @@ impl App {
             self.messages_by_room
                 .entry(room.room_id.clone())
                 .or_default();
+            self.seen_event_ids
+                .entry(room.room_id.clone())
+                .or_default();
         }
         self.rooms = rooms;
         self.selected = 0;
@@ -300,7 +306,20 @@ impl App {
         self.is_syncing = false;
     }
 
-    fn push_message_with_time(&mut self, room_id: &str, ts: i64, sender: &str, body: &str) {
+    fn push_message_with_time(
+        &mut self,
+        room_id: &str,
+        event_id: Option<&str>,
+        ts: i64,
+        sender: &str,
+        body: &str,
+    ) {
+        if let Some(event_id) = event_id {
+            let seen = self.seen_event_ids.entry(room_id.to_string()).or_default();
+            if !seen.insert(event_id.to_string()) {
+                return;
+            }
+        }
         let date = format_date(ts);
         let entry = self.messages_by_room.entry(room_id.to_string()).or_default();
         let last_date = self.last_date_by_room.entry(room_id.to_string()).or_default();
@@ -339,8 +358,7 @@ fn format_sender(sender: &str) -> String {
     trimmed.split(':').next().unwrap_or(trimmed).to_string()
 }
 
-fn parse_command(text: &str) -> Option<MatrixCommand> {
-    let trimmed = text.trim();
+fn parse_command(_text: &str) -> Option<MatrixCommand> {
     None
 }
 
@@ -642,18 +660,18 @@ async fn main() -> Result<()> {
 }
 
 async fn start_matrix(client: matrix_sdk::Client, passphrase: String) -> Result<()> {
+    let (evt_tx, evt_rx) = mpsc::unbounded_channel();
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+
+    tokio::spawn(start_sync(client, passphrase.clone(), cmd_rx, evt_tx));
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let (evt_tx, evt_rx) = mpsc::unbounded_channel();
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-
-    tokio::spawn(start_sync(client, passphrase, cmd_rx, evt_tx));
-
-    let res = run_app(&mut terminal, evt_rx, cmd_tx);
+    let res = run_app(&mut terminal, evt_rx, cmd_tx, passphrase);
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
@@ -667,9 +685,27 @@ fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     mut evt_rx: mpsc::UnboundedReceiver<MatrixEvent>,
     cmd_tx: mpsc::UnboundedSender<MatrixCommand>,
+    passphrase: String,
 ) -> io::Result<()> {
     let mut app = App::new();
     let mut last_tick = Instant::now();
+    if let Ok(base) = messages_dir() {
+        if let Ok(persisted) = load_all_messages(&base, &passphrase) {
+            for (room_key, mut records) in persisted {
+                records.sort_by_key(|m| m.timestamp);
+                for record in records {
+                    let room_id = room_key.replace('_', ":");
+                    app.push_message_with_time(
+                        &room_id,
+                        record.event_id.as_deref(),
+                        record.timestamp,
+                        &record.sender,
+                        &record.body,
+                    );
+                }
+            }
+        }
+    }
 
     loop {
         while let Ok(evt) = evt_rx.try_recv() {
@@ -677,11 +713,12 @@ fn run_app(
                 MatrixEvent::Rooms(rooms) => app.update_rooms(rooms),
                 MatrixEvent::Message {
                     room_id,
+                    event_id,
                     sender,
                     body,
                     timestamp,
                 } => {
-                    app.push_message_with_time(&room_id, timestamp, &sender, &body);
+                    app.push_message_with_time(&room_id, Some(&event_id), timestamp, &sender, &body);
                 }
                 MatrixEvent::VerificationEmojis { emojis } => {
                     app.show_verification_emojis(emojis);

@@ -5,7 +5,7 @@ use matrix_sdk::config::SyncSettings;
 use matrix_sdk::ruma::events::room::message::{MessageType, OriginalSyncRoomMessageEvent};
 use matrix_sdk::ruma::RoomId;
 use matrix_sdk::encryption::verification::{
-    AcceptSettings, SasState, SasVerification, Verification, VerificationRequestState,
+    AcceptSettings, SasState, SasVerification, VerificationRequestState,
 };
 use matrix_sdk::encryption::EncryptionSettings;
 use matrix_sdk::matrix_auth::MatrixSession;
@@ -15,7 +15,7 @@ use tokio::sync::{mpsc, Mutex};
 use std::sync::Arc;
 
 use crate::config::AccountConfig;
-use crate::storage::{ensure_room_dir, room_log_path, read_encrypted, write_encrypted};
+use crate::storage::{append_message, StoredMessage};
 
 #[derive(Debug, Clone)]
 pub struct RoomInfo {
@@ -28,6 +28,7 @@ pub enum MatrixEvent {
     Rooms(Vec<RoomInfo>),
     Message {
         room_id: String,
+        event_id: String,
         sender: String,
         body: String,
         timestamp: i64,
@@ -127,17 +128,26 @@ pub async fn start_sync(
                 }
                 let MessageType::Text(text) = &ev.content.msgtype else { return; };
                 let room_id = room.room_id().to_string();
+                let event_id = ev.event_id.to_string();
                 let sender = ev.sender.to_string();
                 let body = text.body.clone();
                 let ts = i64::from(ev.origin_server_ts.0);
                 let _ = evt_tx
                     .send(MatrixEvent::Message {
                         room_id: room_id.clone(),
+                        event_id: event_id.clone(),
                         sender: sender.clone(),
                         body: body.clone(),
                         timestamp: ts,
                     });
-                let _ = store_message_encrypted(&passphrase, &room_id, ts, &sender, &body);
+                let _ = store_message_encrypted(
+                    &passphrase,
+                    &room_id,
+                    ts,
+                    &sender,
+                    &body,
+                    Some(&event_id),
+                );
             }
         });
 
@@ -152,7 +162,7 @@ pub async fn start_sync(
                 if let Ok(room_id) = RoomId::parse(&room_id) {
                     if let Some(room) = client.get_room(&room_id) {
                         let content = matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
-                            body,
+                            body.clone(),
                         );
                         let _ = room.send(content).await;
                     }
@@ -310,22 +320,15 @@ fn store_message_encrypted(
     ts: i64,
     sender: &str,
     body: &str,
+    event_id: Option<&str>,
 ) -> Result<()> {
     let messages_dir = crate::config::messages_dir()?;
-    let _ = ensure_room_dir(&messages_dir, room_id)?;
-    let path = room_log_path(&messages_dir, room_id);
-    let mut records = if path.exists() {
-        let raw = read_encrypted(&path, passphrase)?;
-        serde_json::from_slice::<Vec<serde_json::Value>>(&raw).unwrap_or_default()
-    } else {
-        Vec::new()
+    let record = StoredMessage {
+        timestamp: ts,
+        sender: sender.to_string(),
+        body: body.to_string(),
+        event_id: event_id.map(|id| id.to_string()),
     };
-    records.push(serde_json::json!({
-        "timestamp": ts,
-        "sender": sender,
-        "body": body,
-    }));
-    let data = serde_json::to_vec(&records)?;
-    write_encrypted(&path, passphrase, &data)?;
+    append_message(&messages_dir, passphrase, room_id, record)?;
     Ok(())
 }
