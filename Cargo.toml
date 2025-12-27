@@ -11,9 +11,10 @@ crossterm = "0.27"
 arboard = "3"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 anyhow = "1"
-matrix-sdk = { version = "0.7", default-features = false, features = ["rustls-tls"] }
+matrix-sdk = { version = "0.7", default-features = false, features = ["rustls-tls", "e2e-encryption", "sqlite"] }
 rpassword = "7"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 toml = "0.8"
+futures-util = "0.3"

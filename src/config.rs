@@ -34,6 +34,12 @@ pub fn data_dir() -> io::Result<PathBuf> {
     Ok(dir)
 }
 
+pub fn crypto_dir() -> io::Result<PathBuf> {
+    let dir = data_dir()?.join("crypto");
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
 fn home_dir() -> io::Result<PathBuf> {
     std::env::var_os("HOME")
         .map(PathBuf::from)

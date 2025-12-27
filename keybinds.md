@@ -3,9 +3,11 @@
         Up One Channel Up
         Down One Channel Down
         Alt+A Add chat (room or user).
+        Alt+V Start verification (SAS).
     Message input
         /join <#alias|!id> Join a room.
         /dm <@user:server> Start a direct message.
+        /verify Start verification (SAS).
         enter when input box empty in single-line mode Open URL from selected message.
         enter otherwise Send message.
     Message/channel selection

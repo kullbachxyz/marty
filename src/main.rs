@@ -28,15 +28,17 @@ use crate::config::{config_path, data_dir, load_config, save_config};
 use crate::matrix::{build_client, login, start_sync, MatrixCommand, MatrixEvent, RoomInfo};
 
 const TICK_RATE: Duration = Duration::from_millis(100);
-const HELP_LINES: [&str; 18] = [
+const HELP_LINES: [&str; 20] = [
     "App navigation",
     "  F1 Toggle help panel showing shortcuts.",
     "  Up One Channel Up",
     "  Down One Channel Down",
     "  Alt+A Add chat (room or user).",
+    "  Alt+V Start verification (SAS).",
     "Message input",
     "  /join <#alias|!id> Join a room.",
     "  /dm <@user:server> Start a direct message.",
+    "  /verify Start verification (SAS).",
     "  Enter when input box empty in single-line mode Open URL from selected message.",
     "  Enter otherwise Send message.",
     "Message/channel selection",
@@ -72,6 +74,8 @@ struct App {
     message_selected: Option<usize>,
     input: String,
     add_prompt: Option<String>,
+    verification_emojis: Option<Vec<(String, String)>>,
+    verification_status: Option<String>,
     help_open: bool,
     help_scroll: u16,
     media_dir: PathBuf,
@@ -89,6 +93,8 @@ impl App {
             message_selected: None,
             input: String::new(),
             add_prompt: None,
+            verification_emojis: None,
+            verification_status: None,
             help_open: false,
             help_scroll: 0,
             media_dir: ensure_media_dir(),
@@ -161,6 +167,22 @@ impl App {
         Some(MatrixCommand::JoinRoom {
             room: trimmed.to_string(),
         })
+    }
+
+    fn show_verification_emojis(&mut self, emojis: Vec<(String, String)>) {
+        self.verification_emojis = Some(emojis);
+        self.verification_status =
+            Some("Match the emojis on your other device. Y=confirm, N=cancel".to_string());
+    }
+
+    fn show_verification_status(&mut self, status: &str) {
+        self.verification_emojis = None;
+        self.verification_status = Some(status.to_string());
+    }
+
+    fn clear_verification(&mut self) {
+        self.verification_emojis = None;
+        self.verification_status = None;
     }
 
     fn on_escape(&mut self) {
@@ -329,6 +351,9 @@ fn parse_command(text: &str) -> Option<MatrixCommand> {
                 user_id: user_id.to_string(),
             });
         }
+    }
+    if trimmed == "/verify" {
+        return Some(MatrixCommand::StartVerification);
     }
     None
 }
@@ -661,6 +686,18 @@ fn run_app(
                 } => {
                     app.push_message_with_time(&room_id, timestamp, &sender, &body);
                 }
+                MatrixEvent::VerificationEmojis { emojis } => {
+                    app.show_verification_emojis(emojis);
+                }
+                MatrixEvent::VerificationStatus { message } => {
+                    app.show_verification_status(&message);
+                }
+                MatrixEvent::VerificationDone => {
+                    app.show_verification_status("Verification complete.");
+                }
+                MatrixEvent::VerificationCancelled { reason } => {
+                    app.show_verification_status(&format!("Verification cancelled: {}", reason));
+                }
             }
         }
 
@@ -726,6 +763,9 @@ fn run_app(
             if let Some(ref prompt) = app.add_prompt {
                 render_add_prompt(f, size, prompt);
             }
+            if app.verification_emojis.is_some() || app.verification_status.is_some() {
+                render_verification_overlay(f, size, &app);
+            }
             if app.is_syncing && !app.help_open {
                 render_sync_indicator(f, size);
             }
@@ -757,6 +797,18 @@ fn run_app(
                         KeyCode::Esc => app.on_escape(),
                         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::ALT) => {
                             app.start_add_prompt();
+                        }
+                        KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::ALT) => {
+                            let _ = cmd_tx.send(MatrixCommand::StartVerification);
+                            app.show_verification_status("Waiting for verification...");
+                        }
+                        KeyCode::Char('y') if app.verification_emojis.is_some() => {
+                            let _ = cmd_tx.send(MatrixCommand::ConfirmVerification);
+                            app.show_verification_status("Verification confirmed.");
+                        }
+                        KeyCode::Char('n') if app.verification_emojis.is_some() => {
+                            let _ = cmd_tx.send(MatrixCommand::CancelVerification);
+                            app.show_verification_status("Verification cancelled.");
                         }
                         KeyCode::Up if key.modifiers.contains(KeyModifiers::ALT) => {
                             app.on_message_up()
@@ -849,6 +901,33 @@ fn render_add_prompt(f: &mut ratatui::Frame, area: Rect, input: &str) {
     f.render_widget(text, inner);
     let x = inner.x + (input.len().min(inner.width as usize) as u16);
     f.set_cursor(x, inner.y);
+}
+
+fn render_verification_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let popup = centered_rect(70, 7, area);
+    let block = Block::default().borders(Borders::ALL).title("Verification");
+    f.render_widget(&block, popup);
+    let inner = block.inner(popup);
+    let mut lines = Vec::new();
+    if let Some(ref emojis) = app.verification_emojis {
+        let symbols = emojis
+            .iter()
+            .map(|(symbol, _)| format!("{:^6}", symbol))
+            .collect::<Vec<_>>()
+            .join("");
+        let labels = emojis
+            .iter()
+            .map(|(_, desc)| format!("{:^6}", desc))
+            .collect::<Vec<_>>()
+            .join("");
+        lines.push(Line::from(symbols));
+        lines.push(Line::from(labels));
+    }
+    if let Some(ref status) = app.verification_status {
+        lines.push(Line::from(status.as_str()));
+    }
+    let content = Paragraph::new(lines).wrap(Wrap { trim: false });
+    f.render_widget(content, inner);
 }
 
 fn render_sync_indicator(f: &mut ratatui::Frame, area: Rect) {

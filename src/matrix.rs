@@ -3,16 +3,23 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use futures_util::StreamExt;
 use matrix_sdk::config::SyncSettings;
 use matrix_sdk::ruma::events::room::message::{MessageType, OriginalSyncRoomMessageEvent};
 use matrix_sdk::ruma::RoomId;
+use matrix_sdk::encryption::verification::{
+    AcceptSettings, SasState, SasVerification, VerificationRequestState,
+};
+use matrix_sdk::encryption::EncryptionSettings;
 use matrix_sdk::matrix_auth::MatrixSession;
 use matrix_sdk::room::MessagesOptions;
 use matrix_sdk::{room::Room, Client, RoomState};
 use matrix_sdk::ruma::events::{AnyMessageLikeEvent, AnyTimelineEvent, MessageLikeEvent};
+use matrix_sdk::ruma::events::key::verification::{ShortAuthenticationString, VerificationMethod};
 use matrix_sdk::ruma::events::room::message::OriginalRoomMessageEvent;
 use matrix_sdk::ruma::uint;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
+use std::sync::Arc;
 
 use crate::config::AccountConfig;
 
@@ -31,6 +38,16 @@ pub enum MatrixEvent {
         body: String,
         timestamp: i64,
     },
+    VerificationStatus {
+        message: String,
+    },
+    VerificationEmojis {
+        emojis: Vec<(String, String)>,
+    },
+    VerificationDone,
+    VerificationCancelled {
+        reason: String,
+    },
 }
 
 #[derive(Debug)]
@@ -38,11 +55,22 @@ pub enum MatrixCommand {
     SendMessage { room_id: String, body: String },
     JoinRoom { room: String },
     CreateDirect { user_id: String },
+    StartVerification,
+    ConfirmVerification,
+    CancelVerification,
 }
 
 pub async fn build_client(homeserver: &str) -> Result<Client> {
+    let crypto_dir = crate::config::crypto_dir().context("crypto dir")?;
+    let settings = EncryptionSettings {
+        auto_enable_cross_signing: true,
+        auto_enable_backups: true,
+        ..Default::default()
+    };
     Client::builder()
         .homeserver_url(homeserver)
+        .sqlite_store(crypto_dir, None)
+        .with_encryption_settings(settings)
         .build()
         .await
         .context("create matrix client")
@@ -80,6 +108,7 @@ pub async fn start_sync(
     mut cmd_rx: mpsc::UnboundedReceiver<MatrixCommand>,
     evt_tx: mpsc::UnboundedSender<MatrixEvent>,
 ) -> Result<()> {
+    let sas_state: Arc<Mutex<Option<SasVerification>>> = Arc::new(Mutex::new(None));
     let _ = client.sync_once(SyncSettings::default()).await;
     publish_rooms(&client, &evt_tx).await;
     backfill_rooms(&client, &data_dir, &evt_tx).await;
@@ -141,6 +170,99 @@ pub async fn start_sync(
                     request.invite.push(user_id.to_owned());
                     let _ = client.create_room(request).await;
                     publish_rooms(&client, &evt_tx).await;
+                }
+            }
+            MatrixCommand::StartVerification => {
+                let Some(user_id) = client.user_id() else { continue };
+                if let Ok(Some(user)) = client.encryption().get_user_identity(user_id).await {
+                    if let Ok(request) = user.request_verification().await {
+                        let evt_tx = evt_tx.clone();
+                        let sas_state = sas_state.clone();
+                        let _ = evt_tx.send(MatrixEvent::VerificationStatus {
+                            message: "Waiting for other device...".to_string(),
+                        });
+                        tokio::spawn(async move {
+                            let mut changes = request.changes();
+                            while let Some(state) = changes.next().await {
+                                match state {
+                                    VerificationRequestState::Ready { .. } => {
+                                        let _ = evt_tx.send(MatrixEvent::VerificationStatus {
+                                            message: "SAS requested. Waiting for emojis...".to_string(),
+                                        });
+                                        if let Ok(Some(sas)) = request.start_sas().await {
+                                            let settings = AcceptSettings::with_allowed_methods(vec![
+                                                ShortAuthenticationString::Emoji,
+                                            ]);
+                                            let _ = sas.accept_with_settings(settings).await;
+                                            let mut guard = sas_state.lock().await;
+                                            *guard = Some(sas.clone());
+                                            let evt_tx = evt_tx.clone();
+                                            tokio::spawn(async move {
+                                                let mut sas_changes = sas.changes();
+                                                while let Some(state) = sas_changes.next().await {
+                                                    match state {
+                                                        SasState::KeysExchanged { emojis, .. } => {
+                                                            if let Some(emojis) = emojis {
+                                                                let pairs = emojis
+                                                                    .emojis
+                                                                    .iter()
+                                                                    .map(|e| {
+                                                                        (
+                                                                            e.symbol.to_string(),
+                                                                            e.description.to_string(),
+                                                                        )
+                                                                    })
+                                                                    .collect();
+                                                                let _ = evt_tx.send(
+                                                                    MatrixEvent::VerificationEmojis { emojis: pairs },
+                                                                );
+                                                            }
+                                                        }
+                                                        SasState::Done { .. } => {
+                                                            let _ = evt_tx.send(
+                                                                MatrixEvent::VerificationDone,
+                                                            );
+                                                            break;
+                                                        }
+                                                        SasState::Cancelled(cancel) => {
+                                                            let _ = evt_tx.send(
+                                                                MatrixEvent::VerificationCancelled {
+                                                                    reason: cancel.reason().to_string(),
+                                                                },
+                                                            );
+                                                            break;
+                                                        }
+                                                        _ => {}
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }
+                                    VerificationRequestState::Cancelled(cancel) => {
+                                        let _ = evt_tx.send(MatrixEvent::VerificationCancelled {
+                                            reason: cancel.reason().to_string(),
+                                        });
+                                        break;
+                                    }
+                                    VerificationRequestState::Done => {
+                                        let _ = evt_tx.send(MatrixEvent::VerificationDone);
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+            MatrixCommand::ConfirmVerification => {
+                if let Some(sas) = sas_state.lock().await.take() {
+                    let _ = sas.confirm().await;
+                }
+            }
+            MatrixCommand::CancelVerification => {
+                if let Some(sas) = sas_state.lock().await.take() {
+                    let _ = sas.mismatch().await;
                 }
             }
         }
