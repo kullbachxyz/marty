@@ -10,6 +10,7 @@ use matrix_sdk::encryption::verification::{
 use matrix_sdk::encryption::EncryptionSettings;
 use matrix_sdk::matrix_auth::MatrixSession;
 use matrix_sdk::{room::Room, Client, RoomState};
+use matrix_sdk::DisplayName;
 use matrix_sdk::ruma::events::key::verification::{ShortAuthenticationString, VerificationMethod};
 use tokio::sync::{mpsc, Mutex};
 use std::sync::Arc;
@@ -50,6 +51,7 @@ pub enum MatrixCommand {
     SendMessage { room_id: String, body: String },
     JoinRoom { room: String },
     CreateDirect { user_id: String },
+    LeaveRoom { room_id: String },
     StartVerification,
     ConfirmVerification,
     CancelVerification,
@@ -174,6 +176,14 @@ pub async fn start_sync(
                     publish_rooms(&client, &evt_tx).await;
                 }
             }
+            MatrixCommand::LeaveRoom { room_id } => {
+                if let Ok(room_id) = RoomId::parse(&room_id) {
+                    if let Some(room) = client.get_room(&room_id) {
+                        let _ = room.leave().await;
+                        publish_rooms(&client, &evt_tx).await;
+                    }
+                }
+            }
             MatrixCommand::StartVerification => {
                 let Some(user_id) = client.user_id() else { continue };
                 if let Ok(Some(user)) = client.encryption().get_user_identity(user_id).await {
@@ -251,14 +261,43 @@ async fn publish_rooms(client: &Client, evt_tx: &mpsc::UnboundedSender<MatrixEve
     let mut room_infos = Vec::new();
     for room in rooms {
         let room_id = room.room_id().to_string();
-        let name = room
-            .display_name()
-            .await
-            .map(|name| name.to_string())
-            .unwrap_or_else(|_| room_id.clone());
+        let name = match room.display_name().await {
+            Ok(DisplayName::Empty) | Ok(DisplayName::EmptyWas(_)) => {
+                resolve_room_name(client, &room, &room_id).await
+            }
+            Ok(name) => name.to_string(),
+            Err(_) => resolve_room_name(client, &room, &room_id).await,
+        };
         room_infos.push(RoomInfo { room_id, name });
     }
     let _ = evt_tx.send(MatrixEvent::Rooms(room_infos));
+}
+
+async fn resolve_room_name(client: &Client, room: &Room, fallback: &str) -> String {
+    let own_id = client.user_id().map(|id| id.as_str());
+    if let Some(target) = room
+        .direct_targets()
+        .into_iter()
+        .find(|user| Some(user.as_str()) != own_id)
+    {
+        return format_user_id(target.as_str());
+    }
+    if let Some(name) = room.name() {
+        return name;
+    }
+    if let Some(alias) = room.canonical_alias().or_else(|| room.alt_aliases().pop()) {
+        return alias.to_string();
+    }
+    fallback.to_string()
+}
+
+fn format_user_id(user_id: &str) -> String {
+    user_id
+        .trim_start_matches('@')
+        .split(':')
+        .next()
+        .unwrap_or(user_id)
+        .to_string()
 }
 
 async fn start_sas_flow(

@@ -33,13 +33,14 @@ use crate::matrix::{build_client, login_with_client, start_sync, MatrixCommand, 
 use crate::storage::load_all_messages;
 
 const TICK_RATE: Duration = Duration::from_millis(100);
-const HELP_LINES: [&str; 18] = [
+const HELP_LINES: [&str; 19] = [
     "App navigation",
     "  F1 Toggle help panel showing shortcuts.",
     "  Up One Channel Up",
     "  Down One Channel Down",
     "  Alt+A Add chat (room or user).",
     "  Alt+J Join/add chat (room or user).",
+    "  Alt+D Delete chat (type DELETE to confirm).",
     "  Alt+V Start verification (SAS).",
     "Message input",
     "  Enter when input box empty in single-line mode Open URL from selected message.",
@@ -64,6 +65,16 @@ enum MessageItem {
     },
 }
 
+enum PromptMode {
+    Add,
+    Delete { room_id: String, room_name: String },
+}
+
+struct PromptState {
+    mode: PromptMode,
+    input: String,
+}
+
 struct App {
     rooms: Vec<RoomInfo>,
     selected: usize,
@@ -72,7 +83,7 @@ struct App {
     seen_event_ids: HashMap<String, HashSet<String>>,
     message_selected: Option<usize>,
     input: String,
-    add_prompt: Option<String>,
+    prompt: Option<PromptState>,
     verification_emojis: Option<Vec<(String, String)>>,
     verification_status: Option<String>,
     verification_until: Option<Instant>,
@@ -92,7 +103,7 @@ impl App {
             seen_event_ids: HashMap::new(),
             message_selected: None,
             input: String::new(),
-            add_prompt: None,
+            prompt: None,
             verification_emojis: None,
             verification_status: None,
             verification_until: None,
@@ -134,39 +145,69 @@ impl App {
     }
 
     fn start_add_prompt(&mut self) {
-        self.add_prompt = Some(String::new());
+        self.prompt = Some(PromptState {
+            mode: PromptMode::Add,
+            input: String::new(),
+        });
     }
 
-    fn cancel_add_prompt(&mut self) {
-        self.add_prompt = None;
-    }
-
-    fn add_prompt_backspace(&mut self) {
-        if let Some(input) = self.add_prompt.as_mut() {
-            input.pop();
-        }
-    }
-
-    fn add_prompt_push(&mut self, c: char) {
-        if let Some(input) = self.add_prompt.as_mut() {
-            input.push(c);
-        }
-    }
-
-    fn submit_add_prompt(&mut self) -> Option<MatrixCommand> {
-        let input = self.add_prompt.take()?;
-        let trimmed = input.trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-        if trimmed.starts_with('@') {
-            return Some(MatrixCommand::CreateDirect {
-                user_id: trimmed.to_string(),
+    fn start_delete_prompt(&mut self) {
+        if let Some(room) = self.rooms.get(self.selected) {
+            self.prompt = Some(PromptState {
+                mode: PromptMode::Delete {
+                    room_id: room.room_id.clone(),
+                    room_name: room.name.clone(),
+                },
+                input: String::new(),
             });
         }
-        Some(MatrixCommand::JoinRoom {
-            room: trimmed.to_string(),
-        })
+    }
+
+    fn cancel_prompt(&mut self) {
+        self.prompt = None;
+    }
+
+    fn prompt_backspace(&mut self) {
+        if let Some(state) = self.prompt.as_mut() {
+            state.input.pop();
+        }
+    }
+
+    fn prompt_push(&mut self, c: char) {
+        if let Some(state) = self.prompt.as_mut() {
+            state.input.push(c);
+        }
+    }
+
+    fn submit_prompt(&mut self) -> Option<MatrixCommand> {
+        let mut state = self.prompt.take()?;
+        let trimmed = state.input.trim();
+        if trimmed.is_empty() {
+            self.prompt = Some(state);
+            return None;
+        }
+        match &state.mode {
+            PromptMode::Add => {
+                if trimmed.starts_with('@') {
+                    return Some(MatrixCommand::CreateDirect {
+                        user_id: trimmed.to_string(),
+                    });
+                }
+                Some(MatrixCommand::JoinRoom {
+                    room: trimmed.to_string(),
+                })
+            }
+            PromptMode::Delete { room_id, .. } => {
+                if trimmed.eq_ignore_ascii_case("delete") {
+                    let room_id = room_id.clone();
+                    Some(MatrixCommand::LeaveRoom { room_id })
+                } else {
+                    state.input.clear();
+                    self.prompt = Some(state);
+                    None
+                }
+            }
+        }
     }
 
     fn show_verification_emojis(&mut self, emojis: Vec<(String, String)>) {
@@ -747,8 +788,8 @@ fn run_app(
                 f.set_cursor(cursor_x, y);
             }
 
-            if let Some(ref prompt) = app.add_prompt {
-                render_add_prompt(f, size, prompt);
+            if let Some(ref prompt) = app.prompt {
+                render_prompt(f, size, prompt);
             }
             if app.verification_emojis.is_some() || app.verification_status.is_some() {
                 render_verification_overlay(f, size, &app);
@@ -764,16 +805,16 @@ fn run_app(
         if event::poll(timeout)? {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
-                    if app.add_prompt.is_some() {
+                    if app.prompt.is_some() {
                         match key.code {
-                            KeyCode::Esc => app.cancel_add_prompt(),
+                            KeyCode::Esc => app.cancel_prompt(),
                             KeyCode::Enter => {
-                                if let Some(cmd) = app.submit_add_prompt() {
+                                if let Some(cmd) = app.submit_prompt() {
                                     let _ = cmd_tx.send(cmd);
                                 }
                             }
-                            KeyCode::Backspace => app.add_prompt_backspace(),
-                            KeyCode::Char(c) => app.add_prompt_push(c),
+                            KeyCode::Backspace => app.prompt_backspace(),
+                            KeyCode::Char(c) => app.prompt_push(c),
                             _ => {}
                         }
                         continue;
@@ -795,6 +836,9 @@ fn run_app(
                         }
                         KeyCode::Char('j') if key.modifiers.contains(KeyModifiers::ALT) => {
                             app.start_add_prompt();
+                        }
+                        KeyCode::Char('d') if key.modifiers.contains(KeyModifiers::ALT) => {
+                            app.start_delete_prompt();
                         }
                         KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::ALT) => {
                             let _ = cmd_tx.send(MatrixCommand::StartVerification);
@@ -947,14 +991,20 @@ async fn login_with_recovery(
     }
 }
 
-fn render_add_prompt(f: &mut ratatui::Frame, area: Rect, input: &str) {
+fn render_prompt(f: &mut ratatui::Frame, area: Rect, prompt: &PromptState) {
     let popup = centered_rect(60, 3, area);
-    let block = Block::default().borders(Borders::ALL).title("Add chat (@user or #room)");
+    let title = match &prompt.mode {
+        PromptMode::Add => "Add chat (@user or #room)".to_string(),
+        PromptMode::Delete { room_name, .. } => {
+            format!("Delete chat \"{}\"? Type DELETE", room_name)
+        }
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
     f.render_widget(&block, popup);
     let inner = block.inner(popup);
-    let text = Paragraph::new(input);
+    let text = Paragraph::new(prompt.input.as_str());
     f.render_widget(text, inner);
-    let x = inner.x + (input.len().min(inner.width as usize) as u16);
+    let x = inner.x + (prompt.input.len().min(inner.width as usize) as u16);
     f.set_cursor(x, inner.y);
 }
 

@@ -4,6 +4,7 @@
         Down One Channel Down
         Alt+A Add chat (room or user).
         Alt+J Join/add chat (room or user).
+        Alt+D Delete chat (type DELETE to confirm).
         Alt+V Start verification (SAS).
     Message input
         enter when input box empty in single-line mode Open URL from selected message.
