@@ -14,6 +14,14 @@ A Matrix TUI client inspired by gurk-rs.
 - Build and run:
   - `cargo run`
 
+### Building from Source
+```text
+git clone https://github.com/kullbachxyz/marty
+cd marty
+cargo build --release
+sudo cp target/release/marty /usr/local/bin/
+```
+
 ## Project Structure
 ```text
 marty/
