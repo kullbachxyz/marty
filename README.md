@@ -27,6 +27,8 @@ sudo cp target/release/marty /usr/local/bin/
 - [ ] Project Page
 - [ ] improve help page
 - [ ] Desktop notification support
+- [ ] Attachment support (xdg-open)
+- [ ] Invite support
 - [x] Data Encryption at rest
 - [x] Session Verification
 - [x] Adding/Deleting chats
