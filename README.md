@@ -22,10 +22,17 @@ cargo build --release
 sudo cp target/release/marty /usr/local/bin/
 ```
 
-## Data Locations
-- `~/.config/marty/config` Config file (accounts, active profile, encrypted session blob).
-- `~/.local/share/marty/crypto/` Matrix SDK encrypted crypto store (keys, device state).
-- `~/.local/share/marty/messages/` Encrypted local message archive per room.
+## ToDo
+- [ ] multi account support
+- [ ] Project Page
+- [ ] improve help page
+- [ ] Desktop notification support
+- [x] Data Encryption at rest
+- [x] Session Verification
+- [x] Adding/Deleting chats
+- [x] matrix-sdk implementation
+- [x] Basic TUI layout
+
 
 ## Project Structure
 ```text
@@ -39,3 +46,8 @@ marty/
 ├── Cargo.toml
 └── README.md
 ```
+
+## Data Locations
+- `~/.config/marty/config` Config file (accounts, active profile, encrypted session blob).
+- `~/.local/share/marty/crypto/` Matrix SDK encrypted crypto store (keys, device state).
+- `~/.local/share/marty/messages/` Encrypted local message archive per room.
