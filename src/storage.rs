@@ -3,6 +3,8 @@ use std::path::{Path, PathBuf};
 
 use aes_gcm::aead::{Aead, KeyInit, OsRng};
 use aes_gcm::{Aes256Gcm, Nonce};
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use base64::Engine;
 use pbkdf2::pbkdf2_hmac;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
@@ -11,6 +13,13 @@ use sha2::Sha256;
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
 const PBKDF2_ITERS: u32 = 100_000;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EncryptedValue {
+    pub salt: String,
+    pub nonce: String,
+    pub data: String,
+}
 
 pub fn write_encrypted(path: &Path, passphrase: &str, plaintext: &[u8]) -> std::io::Result<()> {
     let mut salt = [0u8; SALT_LEN];
@@ -43,7 +52,63 @@ pub fn read_encrypted(path: &Path, passphrase: &str) -> std::io::Result<Vec<u8>>
     }
     let (salt, rest) = data.split_at(SALT_LEN);
     let (nonce_bytes, ciphertext) = rest.split_at(NONCE_LEN);
+    decrypt_bytes(passphrase, salt, nonce_bytes, ciphertext)
+}
 
+pub fn encrypt_value(passphrase: &str, plaintext: &[u8]) -> std::io::Result<EncryptedValue> {
+    let mut salt = [0u8; SALT_LEN];
+    let mut nonce_bytes = [0u8; NONCE_LEN];
+    OsRng.fill_bytes(&mut salt);
+    OsRng.fill_bytes(&mut nonce_bytes);
+    let ciphertext = encrypt_bytes(passphrase, &salt, &nonce_bytes, plaintext)?;
+    Ok(EncryptedValue {
+        salt: BASE64_STANDARD.encode(salt),
+        nonce: BASE64_STANDARD.encode(nonce_bytes),
+        data: BASE64_STANDARD.encode(ciphertext),
+    })
+}
+
+pub fn decrypt_value(passphrase: &str, value: &EncryptedValue) -> std::io::Result<Vec<u8>> {
+    let salt = BASE64_STANDARD
+        .decode(&value.salt)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid salt"))?;
+    let nonce = BASE64_STANDARD
+        .decode(&value.nonce)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid nonce"))?;
+    let data = BASE64_STANDARD
+        .decode(&value.data)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid data"))?;
+    if salt.len() != SALT_LEN || nonce.len() != NONCE_LEN {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "invalid encrypted value",
+        ));
+    }
+    decrypt_bytes(passphrase, &salt, &nonce, &data)
+}
+
+fn encrypt_bytes(
+    passphrase: &str,
+    salt: &[u8],
+    nonce_bytes: &[u8],
+    plaintext: &[u8],
+) -> std::io::Result<Vec<u8>> {
+    let mut key = [0u8; 32];
+    pbkdf2_hmac::<Sha256>(passphrase.as_bytes(), salt, PBKDF2_ITERS, &mut key);
+    let cipher = Aes256Gcm::new_from_slice(&key).expect("key size");
+    let nonce = Nonce::from_slice(nonce_bytes);
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext)
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::Other, "encrypt failed"))?;
+    Ok(ciphertext)
+}
+
+fn decrypt_bytes(
+    passphrase: &str,
+    salt: &[u8],
+    nonce_bytes: &[u8],
+    ciphertext: &[u8],
+) -> std::io::Result<Vec<u8>> {
     let mut key = [0u8; 32];
     pbkdf2_hmac::<Sha256>(passphrase.as_bytes(), salt, PBKDF2_ITERS, &mut key);
     let cipher = Aes256Gcm::new_from_slice(&key).expect("key size");

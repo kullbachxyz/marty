@@ -25,7 +25,10 @@ use ratatui::Terminal;
 use rpassword::read_password;
 use tokio::sync::mpsc;
 
-use crate::config::{config_path, crypto_dir, load_config, messages_dir, save_config};
+use crate::config::{
+    config_path, crypto_dir, decrypt_sessions, encrypt_account_session, encrypt_missing_sessions,
+    load_config, messages_dir, save_config,
+};
 use crate::matrix::{build_client, login_with_client, start_sync, MatrixCommand, MatrixEvent, RoomInfo};
 use crate::storage::load_all_messages;
 
@@ -554,6 +557,10 @@ async fn main() -> Result<()> {
         "Enter passphrase: "
     };
     let passphrase = prompt_password(passphrase_prompt)?;
+    decrypt_sessions(&mut cfg, &passphrase)?;
+    if encrypt_missing_sessions(&mut cfg, &passphrase)? {
+        save_config(&config_file, &cfg)?;
+    }
 
     let account = if cfg.accounts.is_empty() {
         let homeserver = prompt("Homeserver URL: ")?;
@@ -561,7 +568,9 @@ async fn main() -> Result<()> {
         let password = prompt_password("Password: ")?;
         let (client, account) =
             login_with_recovery(&homeserver, &username, &password, &passphrase).await?;
-        cfg.accounts.push(account.clone());
+        let mut account = account.clone();
+        encrypt_account_session(&mut account, &passphrase)?;
+        cfg.accounts.push(account);
         cfg.active = Some(0);
         save_config(&config_file, &cfg)?;
         return start_matrix(client, passphrase).await;
@@ -579,7 +588,7 @@ async fn main() -> Result<()> {
             let (client, updated) =
                 login_with_recovery(&account.homeserver, &account.username, &password, &passphrase)
                     .await?;
-            update_account_session(&mut cfg, &updated);
+            update_account_session(&mut cfg, &updated, &passphrase)?;
             save_config(&config_file, &cfg)?;
             client
         }
@@ -588,7 +597,7 @@ async fn main() -> Result<()> {
         let (client, updated) =
             login_with_recovery(&account.homeserver, &account.username, &password, &passphrase)
                 .await?;
-        update_account_session(&mut cfg, &updated);
+        update_account_session(&mut cfg, &updated, &passphrase)?;
         save_config(&config_file, &cfg)?;
         client
     };
@@ -865,16 +874,24 @@ fn run_app(
     }
 }
 
-fn update_account_session(cfg: &mut config::AppConfig, updated: &config::AccountConfig) {
+fn update_account_session(
+    cfg: &mut config::AppConfig,
+    updated: &config::AccountConfig,
+    passphrase: &str,
+) -> io::Result<()> {
     if let Some(idx) = cfg.active {
         if let Some(existing) = cfg.accounts.get_mut(idx) {
             existing.session = updated.session.clone();
             existing.user_id = updated.user_id.clone();
-            return;
+            encrypt_account_session(existing, passphrase)?;
+            return Ok(());
         }
     }
-    cfg.accounts.push(updated.clone());
+    let mut account = updated.clone();
+    encrypt_account_session(&mut account, passphrase)?;
+    cfg.accounts.push(account);
     cfg.active = Some(0);
+    Ok(())
 }
 
 async fn build_client_with_recovery(

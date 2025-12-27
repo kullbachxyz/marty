@@ -91,6 +91,7 @@ pub async fn login_with_client(
         username: username.to_string(),
         user_id: Some(response.user_id.to_string()),
         display_name: None,
+        session_encrypted: None,
         session: Some(session),
     })
 }
