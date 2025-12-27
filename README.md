@@ -15,7 +15,7 @@ A Matrix TUI client inspired by gurk-rs.
   - `cargo run`
 
 ## Project Structure
-#+BEGIN_SRC
+```text
 marty/
 ├── src/
 │   ├── main.rs         # TUI, input handling, and app state
@@ -25,4 +25,4 @@ marty/
 ├── keybinds.md         # Keybinding reference
 ├── Cargo.toml
 └── README.md
-#+END_SRC
+```
