@@ -27,6 +27,7 @@ sudo cp target/release/marty /usr/local/bin/
 - [ ] Project Page
 - [ ] improve help page
 - [ ] Desktop notification support
+- [ ] Persist '[accounts.session_encrypted]' in the DB
 - [ ] Attachment support (xdg-open)
 - [ ] Invite support
 - [x] Data Encryption at rest
