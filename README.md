@@ -30,7 +30,8 @@ sudo cp target/release/marty /usr/local/bin/
 - [ ] Persist [accounts.session_encrypted] in the DB
 - [ ] Attachment support (xdg-open)
 - [ ] User verification support
-- [ ] Invite support
+- [x] Sync data since last connect
+- [x] Invite support
 - [x] Data Encryption at rest
 - [x] Session Verification
 - [x] Adding/Deleting chats
