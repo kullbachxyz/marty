@@ -110,6 +110,7 @@ struct App {
     last_date_by_room: HashMap<String, String>,
     seen_event_ids: HashMap<String, HashSet<String>>,
     reply_index: HashMap<String, HashMap<String, ReplyPreview>>,
+    read_receipts: HashMap<String, HashSet<String>>,
     last_message_ts: HashMap<String, i64>,
     last_seen_ts: HashMap<String, i64>,
     unread_counts: HashMap<String, usize>,
@@ -138,6 +139,7 @@ impl App {
             last_date_by_room: HashMap::new(),
             seen_event_ids: HashMap::new(),
             reply_index: HashMap::new(),
+            read_receipts: HashMap::new(),
             last_message_ts: HashMap::new(),
             last_seen_ts: HashMap::new(),
             unread_counts: HashMap::new(),
@@ -443,6 +445,35 @@ impl App {
             .and_then(|map| map.get(reply_to))
     }
 
+    fn mark_read_receipt(&mut self, room_id: &str, event_id: &str) {
+        self.read_receipts
+            .entry(room_id.to_string())
+            .or_default()
+            .insert(event_id.to_string());
+    }
+
+    fn has_read_receipt(&self, room_id: &str, event_id: &str) -> bool {
+        self.read_receipts
+            .get(room_id)
+            .map(|set| set.contains(event_id))
+            .unwrap_or(false)
+    }
+
+    fn read_receipt_for(
+        &self,
+        room_id: &str,
+        sender_id: &str,
+        event_id: Option<&str>,
+    ) -> Option<bool> {
+        if !is_own_sender(sender_id, self.own_user_id.as_deref()) {
+            return None;
+        }
+        let Some(event_id) = event_id else {
+            return Some(false);
+        };
+        Some(self.has_read_receipt(room_id, event_id))
+    }
+
     fn selected_attachment_path(&self) -> Option<String> {
         let idx = self.message_selected?;
         let messages = self.current_messages()?;
@@ -481,6 +512,9 @@ impl App {
                 .entry(room.room_id.clone())
                 .or_default();
             self.reply_index
+                .entry(room.room_id.clone())
+                .or_default();
+            self.read_receipts
                 .entry(room.room_id.clone())
                 .or_default();
             self.unread_counts.entry(room.room_id.clone()).or_default();
@@ -804,6 +838,7 @@ fn render_messages_area(
                 sender_id,
                 text,
                 reply_to,
+                event_id,
                 ..
             } => {
                 if let (Some(reply_id), Some(room_id)) = (reply_to.as_deref(), room_id.as_deref())
@@ -812,8 +847,16 @@ fn render_messages_area(
                     let reply_text = preview
                         .map(|p| format!("> ({}) {}", p.sender, p.text))
                         .unwrap_or_else(|| "> (unknown)".to_string());
-                    let mut spans =
-                        message_spans(time, name, sender_id, app.own_user_id.as_deref(), "");
+                    let read_receipt =
+                        app.read_receipt_for(room_id, sender_id, event_id.as_deref());
+                    let mut spans = message_spans(
+                        time,
+                        name,
+                        sender_id,
+                        app.own_user_id.as_deref(),
+                        "",
+                        read_receipt,
+                    );
                     spans.push(Span::styled(
                         reply_text,
                         Style::default().fg(Color::Rgb(150, 150, 150)),
@@ -823,7 +866,7 @@ fn render_messages_area(
                     if y >= max_y {
                         break;
                     }
-                    let prefix = format!("{} {}: ", time, name);
+                    let prefix = reply_prefix(time, name, read_receipt);
                     let text_line = vec![
                         Span::raw(" ".repeat(prefix.len())),
                         Span::raw(text.to_string()),
@@ -831,8 +874,17 @@ fn render_messages_area(
                     draw_spans_line(buf, inner, y, &text_line, selected);
                     y = y.saturating_add(1);
                 } else {
-                    let spans =
-                        message_spans(time, name, sender_id, app.own_user_id.as_deref(), text);
+                    let read_receipt = room_id
+                        .as_deref()
+                        .and_then(|id| app.read_receipt_for(id, sender_id, event_id.as_deref()));
+                    let spans = message_spans(
+                        time,
+                        name,
+                        sender_id,
+                        app.own_user_id.as_deref(),
+                        text,
+                        read_receipt,
+                    );
                     draw_spans_line(buf, inner, y, &spans, selected);
                     y = y.saturating_add(1);
                 }
@@ -844,6 +896,7 @@ fn render_messages_area(
                 label,
                 filename,
                 reply_to,
+                event_id,
                 ..
             } => {
                 let text = format!("[{}] {}", label, filename);
@@ -853,8 +906,16 @@ fn render_messages_area(
                     let reply_text = preview
                         .map(|p| format!("> ({}) {}", p.sender, p.text))
                         .unwrap_or_else(|| "> (unknown)".to_string());
-                    let mut spans =
-                        message_spans(time, name, sender_id, app.own_user_id.as_deref(), "");
+                    let read_receipt =
+                        app.read_receipt_for(room_id, sender_id, event_id.as_deref());
+                    let mut spans = message_spans(
+                        time,
+                        name,
+                        sender_id,
+                        app.own_user_id.as_deref(),
+                        "",
+                        read_receipt,
+                    );
                     spans.push(Span::styled(
                         reply_text,
                         Style::default().fg(Color::Rgb(150, 150, 150)),
@@ -864,7 +925,7 @@ fn render_messages_area(
                     if y >= max_y {
                         break;
                     }
-                    let prefix = format!("{} {}: ", time, name);
+                    let prefix = reply_prefix(time, name, read_receipt);
                     let text_line = vec![
                         Span::raw(" ".repeat(prefix.len())),
                         Span::raw(text.to_string()),
@@ -872,8 +933,17 @@ fn render_messages_area(
                     draw_spans_line(buf, inner, y, &text_line, selected);
                     y = y.saturating_add(1);
                 } else {
-                    let spans =
-                        message_spans(time, name, sender_id, app.own_user_id.as_deref(), &text);
+                    let read_receipt = room_id
+                        .as_deref()
+                        .and_then(|id| app.read_receipt_for(id, sender_id, event_id.as_deref()));
+                    let spans = message_spans(
+                        time,
+                        name,
+                        sender_id,
+                        app.own_user_id.as_deref(),
+                        &text,
+                        read_receipt,
+                    );
                     draw_spans_line(buf, inner, y, &spans, selected);
                     y = y.saturating_add(1);
                 }
@@ -890,6 +960,15 @@ fn format_help_line(line: &str) -> String {
     let left_len = left.len();
     let pad = if left_len >= KEY_COL { 1 } else { KEY_COL - left_len };
     format!("{}{}{}", left, " ".repeat(pad), right)
+}
+
+fn reply_prefix(time: &str, name: &str, read_receipt: Option<bool>) -> String {
+    let mut prefix = String::new();
+    if let Some(read) = read_receipt {
+        prefix.push_str(if read { "● " } else { "○ " });
+    }
+    prefix.push_str(&format!("{} {}: ", time, name));
+    prefix
 }
 
 fn cursor_position(input: &str, cursor: usize, width: u16) -> (u16, u16) {
@@ -937,7 +1016,16 @@ fn message_spans(
     sender_id: &str,
     own_user_id: Option<&str>,
     text: &str,
+    read_receipt: Option<bool>,
 ) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    if let Some(read) = read_receipt {
+        let symbol = if read { "● " } else { "○ " };
+        spans.push(Span::styled(
+            symbol.to_string(),
+            Style::default().fg(Color::Rgb(160, 160, 160)),
+        ));
+    }
     let time_span = Span::styled(
         format!("{} ", time),
         Style::default().fg(Color::Rgb(238, 193, 99)),
@@ -950,7 +1038,10 @@ fn message_spans(
             .add_modifier(Modifier::BOLD),
     );
     let text_span = Span::raw(text.to_string());
-    vec![time_span, name_span, text_span]
+    spans.push(time_span);
+    spans.push(name_span);
+    spans.push(text_span);
+    spans
 }
 
 fn color_for_sender(sender_id: &str, own_user_id: Option<&str>) -> Color {
@@ -1298,6 +1389,9 @@ fn run_app(
                         let body = format!("[{}] {}", kind, name);
                         notify_send(&title, &body);
                     }
+                }
+                MatrixEvent::Receipt { room_id, event_id } => {
+                    app.mark_read_receipt(&room_id, &event_id);
                 }
                 MatrixEvent::BackfillDone => {
                     app.notifications_ready = true;

@@ -7,6 +7,8 @@ use matrix_sdk::ruma::events::room::{
     message::{MessageType, OriginalRoomMessageEvent, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent},
     MediaSource,
 };
+use matrix_sdk::ruma::events::receipt::{ReceiptEventContent, ReceiptType};
+use matrix_sdk::ruma::events::SyncEphemeralRoomEvent;
 use matrix_sdk::ruma::{uint, RoomId};
 use matrix_sdk::encryption::verification::{
     AcceptSettings, SasState, SasVerification, VerificationRequestState,
@@ -60,6 +62,10 @@ pub enum MatrixEvent {
         kind: String,
         timestamp: i64,
         reply_to: Option<String>,
+    },
+    Receipt {
+        room_id: String,
+        event_id: String,
     },
     BackfillDone,
     VerificationStatus {
@@ -146,6 +152,7 @@ pub async fn start_sync(
 
     let evt_tx_clone = evt_tx.clone();
     let passphrase_clone = passphrase.clone();
+    let own_user = client.user_id().map(|id| id.to_owned());
     client
         .add_event_handler(move |ev: OriginalSyncRoomMessageEvent, room: Room| {
             let evt_tx = evt_tx_clone.clone();
@@ -249,6 +256,38 @@ pub async fn start_sync(
                 }
             }
         });
+
+    let evt_tx_receipts = evt_tx.clone();
+    let own_user_receipts = own_user.clone();
+    client.add_event_handler(move |ev: SyncEphemeralRoomEvent<ReceiptEventContent>, room: Room| {
+        let evt_tx = evt_tx_receipts.clone();
+        let own_user = own_user_receipts.clone();
+        async move {
+            if room.state() != RoomState::Joined {
+                return;
+            }
+            let room_id = room.room_id().to_string();
+            let content = ev.content;
+            for (event_id, receipts) in content.0 {
+                let Some(users) = receipts.get(&ReceiptType::Read) else {
+                    continue;
+                };
+                for (user_id, _) in users {
+                    if own_user
+                        .as_ref()
+                        .is_some_and(|u| u.as_str() == user_id.as_str())
+                    {
+                        continue;
+                    }
+                    let _ = evt_tx.send(MatrixEvent::Receipt {
+                        room_id: room_id.clone(),
+                        event_id: event_id.to_string(),
+                    });
+                    break;
+                }
+            }
+        }
+    });
 
     let sync_client = client.clone();
     let sync_task = tokio::spawn(async move {

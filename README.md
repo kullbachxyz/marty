@@ -11,6 +11,7 @@ A Matrix TUI client inspired by gurk-rs.
 - Invite support with accept/decline from the messages pane
 - Backfill messages since last run
 - Unread counts per channel
+- Read receipts for sent messages (○ delivered / ● read)
 - Desktop notifications via `notify-send`
 - Attachment downloads with `xdg-open`
 - Input editing with multi-line mode, cursor movement, and word jumps
@@ -40,10 +41,10 @@ sudo cp target/release/marty /usr/local/bin/
 - [x] Desktop notification support
 - [x] Reply to message
 - [ ] Typing indicators
-- [ ] Read receipts
+- [x] Read receipts
 - [ ] Attachment send
 - [x] Attachment support (xdg-open)
-- [ ] User verification support
+- [x] User verification support
 - [x] Message Input Editing
 - [x] Backfill messages since last run
 - [x] Invite support
