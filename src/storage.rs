@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -123,6 +124,10 @@ pub fn room_log_path(base: &Path, room_id: &str) -> PathBuf {
     base.join(room_id.replace(':', "_")).join("messages.jsonl.enc")
 }
 
+pub fn room_receipts_path(base: &Path, room_id: &str) -> PathBuf {
+    base.join(room_id.replace(':', "_")).join("read_receipts.json.enc")
+}
+
 pub fn ensure_room_dir(base: &Path, room_id: &str) -> std::io::Result<PathBuf> {
     let dir = base.join(room_id.replace(':', "_"));
     fs::create_dir_all(&dir)?;
@@ -195,6 +200,46 @@ pub fn load_all_messages(
         out.push((room_key, records));
     }
     Ok(out)
+}
+
+pub fn load_all_read_receipts(
+    base: &Path,
+    passphrase: &str,
+) -> std::io::Result<Vec<(String, Vec<String>)>> {
+    let mut out = Vec::new();
+    if !base.exists() {
+        return Ok(out);
+    }
+    for entry in fs::read_dir(base)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let room_key = entry.file_name().to_string_lossy().to_string();
+        let path = entry.path().join("read_receipts.json.enc");
+        if !path.exists() {
+            continue;
+        }
+        let raw = read_encrypted(&path, passphrase)?;
+        let records = serde_json::from_slice::<Vec<String>>(&raw).unwrap_or_default();
+        out.push((room_key, records));
+    }
+    Ok(out)
+}
+
+pub fn store_read_receipts(
+    base: &Path,
+    passphrase: &str,
+    room_id: &str,
+    receipts: &HashSet<String>,
+) -> std::io::Result<()> {
+    let _ = ensure_room_dir(base, room_id)?;
+    let path = room_receipts_path(base, room_id);
+    let mut items: Vec<String> = receipts.iter().cloned().collect();
+    items.sort();
+    let data = serde_json::to_vec(&items)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    write_encrypted(&path, passphrase, &data)
 }
 
 pub fn latest_room_timestamp(

@@ -34,7 +34,7 @@ use crate::config::{
 use crate::matrix::{
     build_client, login_with_client, start_sync, MatrixCommand, MatrixEvent, RoomInfo, RoomListState,
 };
-use crate::storage::load_all_messages;
+use crate::storage::{load_all_messages, load_all_read_receipts, store_read_receipts};
 
 const TICK_RATE: Duration = Duration::from_millis(100);
 const HELP_LINES: [&str; 26] = [
@@ -1351,6 +1351,15 @@ fn run_app(
                 app.last_seen_ts.entry(room_id).or_insert(ts);
             }
         }
+        if let Ok(persisted) = load_all_read_receipts(&base, &passphrase) {
+            for (room_key, records) in persisted {
+                let room_id = room_key.replace('_', ":");
+                let set = app.read_receipts.entry(room_id).or_default();
+                for event_id in records {
+                    set.insert(event_id);
+                }
+            }
+        }
     }
 
     loop {
@@ -1406,6 +1415,11 @@ fn run_app(
                 }
                 MatrixEvent::Receipt { room_id, event_id } => {
                     app.mark_read_receipt(&room_id, &event_id);
+                    if let Ok(base) = messages_dir() {
+                        if let Some(set) = app.read_receipts.get(&room_id) {
+                            let _ = store_read_receipts(&base, &passphrase, &room_id, set);
+                        }
+                    }
                 }
                 MatrixEvent::BackfillDone => {
                     app.notifications_ready = true;
