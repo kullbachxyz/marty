@@ -12,6 +12,7 @@
     Message input
         enter	 When input empty (single-line): open URL/attachment.
         enter	 Send message (single-line) or insert newline (multi-line).
+        file://<path>	 Send attachment from disk.
         alt+enter	 Toggle multi-line input.
         left/right	 Move cursor in input.
         alt+left/alt+right	 Jump word in input.

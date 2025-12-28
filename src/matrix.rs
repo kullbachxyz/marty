@@ -15,11 +15,13 @@ use matrix_sdk::encryption::verification::{
 };
 use matrix_sdk::encryption::EncryptionSettings;
 use matrix_sdk::matrix_auth::MatrixSession;
+use matrix_sdk::attachment::AttachmentConfig;
 use matrix_sdk::room::{MessagesOptions, Room};
 use matrix_sdk::media::{MediaEventContent, MediaFormat, MediaRequest};
 use matrix_sdk::{Client, RoomState};
 use matrix_sdk::DisplayName;
 use matrix_sdk::ruma::events::key::verification::{ShortAuthenticationString, VerificationMethod};
+use mime_guess::from_path;
 use tokio::sync::{mpsc, Mutex};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -85,6 +87,11 @@ pub enum MatrixCommand {
     SendMessage {
         room_id: String,
         body: String,
+        reply_to: Option<String>,
+    },
+    SendAttachment {
+        room_id: String,
+        path: String,
         reply_to: Option<String>,
     },
     JoinRoom { room: String },
@@ -312,6 +319,28 @@ pub async fn start_sync(
                             }
                         }
                         let _ = room.send(content).await;
+                    }
+                }
+            }
+            MatrixCommand::SendAttachment {
+                room_id,
+                path,
+                reply_to,
+            } => {
+                let _reply_to = reply_to;
+                if let Ok(room_id) = RoomId::parse(&room_id) {
+                    if let Some(room) = client.get_room(&room_id) {
+                        let Ok(data) = fs::read(&path) else {
+                            continue;
+                        };
+                        let body = Path::new(&path)
+                            .file_name()
+                            .and_then(|name| name.to_str())
+                            .unwrap_or("attachment");
+                        let mime = from_path(&path).first_or_octet_stream();
+                        let _ = room
+                            .send_attachment(body, &mime, data, AttachmentConfig::new())
+                            .await;
                     }
                 }
             }

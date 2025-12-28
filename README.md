@@ -14,6 +14,7 @@ A Matrix TUI client inspired by gurk-rs.
 - Read receipts for sent messages (○ delivered / ● read)
 - Desktop notifications via `notify-send`
 - Attachment downloads with `xdg-open`
+- Send attachments by typing `file://<path>`
 - Input editing with multi-line mode, cursor movement, and word jumps
 - Clipboard copy grabs message content only (no timestamp/username)
 
@@ -41,7 +42,7 @@ sudo cp target/release/marty /usr/local/bin/
 - [x] Desktop notification support
 - [x] Reply to message
 - [x] Read receipts
-- [ ] Attachment send
+- [x] Attachment send
 - [x] Attachment support (xdg-open)
 - [x] User verification support
 - [x] Message Input Editing

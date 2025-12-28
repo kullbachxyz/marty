@@ -37,7 +37,7 @@ use crate::matrix::{
 use crate::storage::load_all_messages;
 
 const TICK_RATE: Duration = Duration::from_millis(100);
-const HELP_LINES: [&str; 25] = [
+const HELP_LINES: [&str; 26] = [
     "App navigation",
     "  Alt+Q\tQuit.",
     "  F1\tToggle help panel showing shortcuts.",
@@ -52,6 +52,7 @@ const HELP_LINES: [&str; 25] = [
     "Message input",
     "  Enter\tWhen input empty (single-line): open URL/attachment.",
     "  Enter\tSend message (single-line) or insert newline (multi-line).",
+    "  file://<path>\tSend attachment from disk.",
     "  Alt+Enter\tToggle multi-line input.",
     "  Left/Right\tMove cursor in input.",
     "  Alt+Left/Right\tJump word in input.",
@@ -746,6 +747,15 @@ fn format_sender(sender: &str) -> String {
 
 fn parse_command(_text: &str) -> Option<MatrixCommand> {
     None
+}
+
+fn parse_file_input(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let path = trimmed.strip_prefix("file://")?;
+    if path.is_empty() {
+        return None;
+    }
+    Some(path.to_string())
 }
 
 fn prompt(label: &str) -> io::Result<String> {
@@ -1635,6 +1645,23 @@ fn run_app(
                                     let _ = open_path(Path::new(&path));
                                 } else {
                                     app.on_open_url();
+                                }
+                            } else if let Some(path) = parse_file_input(&app.input) {
+                                if Path::new(&path).is_file() {
+                                    if let Some(room_id) = app.selected_room_id() {
+                                        if app.selected_room_is_invited() {
+                                            continue;
+                                        }
+                                        let reply_to = app.selected_message_event_id();
+                                        let _ = cmd_tx.send(MatrixCommand::SendAttachment {
+                                            room_id,
+                                            path,
+                                            reply_to,
+                                        });
+                                        app.input.clear();
+                                        app.input_cursor = 0;
+                                        app.message_selected = None;
+                                    }
                                 }
                             } else if let Some(text) = app.on_enter() {
                                 if let Some(cmd) = parse_command(&text) {
