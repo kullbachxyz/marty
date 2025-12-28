@@ -22,7 +22,7 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
+use ratatui::widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Terminal;
 use rpassword::read_password;
 use tokio::sync::mpsc;
@@ -45,7 +45,7 @@ const HELP_LINES: [&str; 25] = [
     "  Down\tOne Channel Down",
     "  Alt+A\tAdd chat (room or user).",
     "  Alt+J\tJoin/add chat (room or user).",
-    "  Alt+D\tDelete chat (type DELETE to confirm).",
+    "  Alt+D\tDelete chat (y/n confirm).",
     "  Ctrl+A\tAccept invite.",
     "  Ctrl+D\tDecline invite.",
     "  Alt+V\tStart verification (SAS).",
@@ -320,9 +320,11 @@ impl App {
                 })
             }
             PromptMode::Delete { room_id, .. } => {
-                if trimmed.eq_ignore_ascii_case("delete") {
+                if trimmed.eq_ignore_ascii_case("y") || trimmed.eq_ignore_ascii_case("yes") {
                     let room_id = room_id.clone();
                     Some(MatrixCommand::LeaveRoom { room_id })
+                } else if trimmed.eq_ignore_ascii_case("n") || trimmed.eq_ignore_ascii_case("no") {
+                    None
                 } else {
                     state.input.clear();
                     self.prompt = Some(state);
@@ -1763,10 +1765,11 @@ async fn login_with_recovery(
 
 fn render_prompt(f: &mut ratatui::Frame, area: Rect, prompt: &PromptState) {
     let popup = centered_rect(60, 3, area);
+    f.render_widget(Clear, popup);
     let title = match &prompt.mode {
         PromptMode::Add => "Add chat (@user or #room)".to_string(),
         PromptMode::Delete { room_name, .. } => {
-            format!("Delete chat \"{}\"? Type DELETE", room_name)
+            format!("Delete chat \"{}\"? (y/n)", room_name)
         }
     };
     let block = Block::default().borders(Borders::ALL).title(title);

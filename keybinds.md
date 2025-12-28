@@ -5,7 +5,7 @@
         Down	 One Channel Down
         Alt+A	 Add chat (room or user).
         Alt+J	 Join/add chat (room or user).
-        Alt+D	 Delete chat (type DELETE to confirm).
+        Alt+D	 Delete chat (y/n confirm).
         Ctrl+A	 Accept invite.
         Ctrl+D	 Decline invite.
         Alt+V	 Start verification (SAS).

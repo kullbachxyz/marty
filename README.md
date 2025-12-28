@@ -40,7 +40,6 @@ sudo cp target/release/marty /usr/local/bin/
 - [x] improve help page
 - [x] Desktop notification support
 - [x] Reply to message
-- [ ] Typing indicators
 - [x] Read receipts
 - [ ] Attachment send
 - [x] Attachment support (xdg-open)
