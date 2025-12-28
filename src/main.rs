@@ -382,7 +382,7 @@ impl App {
         if let Some(idx) = self.message_selected {
             if let Some(messages) = self.current_messages_mut() {
                 if let Some(msg) = messages.get(idx) {
-                    let text = msg_string(msg);
+                    let text = msg_content(msg);
                     let _ = copy_to_clipboard(&text);
                 }
             }
@@ -683,6 +683,16 @@ fn msg_string(item: &MessageItem) -> String {
             ..
         } => {
             format!("{} {}: [{}] {} ({})", time, name, label, filename, path)
+        }
+    }
+}
+
+fn msg_content(item: &MessageItem) -> String {
+    match item {
+        MessageItem::Separator(label) => label.clone(),
+        MessageItem::Message { text, .. } => text.clone(),
+        MessageItem::Attachment { label, filename, .. } => {
+            format!("[{}] {}", label, filename)
         }
     }
 }

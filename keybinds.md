@@ -20,7 +20,7 @@
         alt+Up	 Select previous message.
         alt+Down	 Select next message.
     Clipboard
-        alt+y	 Copy selected message to clipboard.
+        alt+y	 Copy message content to clipboard.
     Help menu
         esc	 Close help panel.
          Up	 Previous line

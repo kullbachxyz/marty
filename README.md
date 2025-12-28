@@ -14,6 +14,7 @@ A Matrix TUI client inspired by gurk-rs.
 - Desktop notifications via `notify-send`
 - Attachment downloads with `xdg-open`
 - Input editing with multi-line mode, cursor movement, and word jumps
+- Clipboard copy grabs message content only (no timestamp/username)
 
 ## Installation
 - Install Rust (stable) and Cargo
