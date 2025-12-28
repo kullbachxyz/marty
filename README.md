@@ -35,7 +35,7 @@ sudo cp target/release/marty /usr/local/bin/
 - [ ] Persist [accounts.session_encrypted] in the DB
 - [x] Attachment support (xdg-open)
 - [ ] User verification support
-- [ ] Message Input Editing
+- [x] Message Input Editing
 - [x] Backfill messages since last run
 - [x] Invite support
 - [x] Data Encryption at rest

@@ -36,7 +36,7 @@ use crate::matrix::{
 use crate::storage::load_all_messages;
 
 const TICK_RATE: Duration = Duration::from_millis(100);
-const HELP_LINES: [&str; 21] = [
+const HELP_LINES: [&str; 24] = [
     "App navigation",
     "  F1 Toggle help panel showing shortcuts.",
     "  Up One Channel Up",
@@ -49,7 +49,10 @@ const HELP_LINES: [&str; 21] = [
     "  Alt+V Start verification (SAS).",
     "Message input",
     "  Enter when input box empty in single-line mode Open URL or attachment from selected message.",
-    "  Enter otherwise Send message.",
+    "  Enter otherwise Send message (single-line) or insert newline (multi-line).",
+    "  Alt+Enter Toggle multi-line input.",
+    "  Left/Right Move cursor in input.",
+    "  Alt+Left/Right Jump word in input.",
     "Message/channel selection",
     "  Esc Reset message selection or close help panel.",
     "  Alt+Up Select previous message.",
@@ -98,6 +101,8 @@ struct App {
     unread_counts: HashMap<String, usize>,
     message_selected: Option<usize>,
     input: String,
+    input_cursor: usize,
+    input_multiline: bool,
     prompt: Option<PromptState>,
     verification_emojis: Option<Vec<(String, String)>>,
     verification_status: Option<String>,
@@ -123,6 +128,8 @@ impl App {
             unread_counts: HashMap::new(),
             message_selected: None,
             input: String::new(),
+            input_cursor: 0,
+            input_multiline: false,
             prompt: None,
             verification_emojis: None,
             verification_status: None,
@@ -156,10 +163,80 @@ impl App {
         }
     }
 
+    fn input_len_chars(&self) -> usize {
+        self.input.chars().count()
+    }
+
+    fn cursor_to_byte(input: &str, cursor: usize) -> usize {
+        input
+            .char_indices()
+            .nth(cursor)
+            .map(|(idx, _)| idx)
+            .unwrap_or_else(|| input.len())
+    }
+
+    fn input_move_left(&mut self) {
+        if self.input_cursor > 0 {
+            self.input_cursor -= 1;
+        }
+    }
+
+    fn input_move_right(&mut self) {
+        let len = self.input_len_chars();
+        if self.input_cursor < len {
+            self.input_cursor += 1;
+        }
+    }
+
+    fn input_move_word_left(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        let chars: Vec<char> = self.input.chars().collect();
+        let mut idx = self.input_cursor;
+        while idx > 0 && chars[idx - 1].is_whitespace() {
+            idx -= 1;
+        }
+        while idx > 0 && !chars[idx - 1].is_whitespace() {
+            idx -= 1;
+        }
+        self.input_cursor = idx;
+    }
+
+    fn input_move_word_right(&mut self) {
+        let chars: Vec<char> = self.input.chars().collect();
+        let len = chars.len();
+        let mut idx = self.input_cursor;
+        while idx < len && chars[idx].is_whitespace() {
+            idx += 1;
+        }
+        while idx < len && !chars[idx].is_whitespace() {
+            idx += 1;
+        }
+        self.input_cursor = idx;
+    }
+
+    fn input_insert_char(&mut self, c: char) {
+        let idx = Self::cursor_to_byte(&self.input, self.input_cursor);
+        self.input.insert(idx, c);
+        self.input_cursor += 1;
+    }
+
+    fn input_backspace(&mut self) {
+        if self.input_cursor == 0 {
+            return;
+        }
+        let end = Self::cursor_to_byte(&self.input, self.input_cursor);
+        let start = Self::cursor_to_byte(&self.input, self.input_cursor - 1);
+        self.input.replace_range(start..end, "");
+        self.input_cursor -= 1;
+    }
+
     fn on_enter(&mut self) -> Option<String> {
         if !self.input.trim().is_empty() {
             let text = self.input.trim_end().to_string();
             self.input.clear();
+            self.input_cursor = 0;
             return Some(text);
         }
         None
@@ -665,6 +742,30 @@ fn render_messages_area(
     }
 }
 
+fn cursor_position(input: &str, cursor: usize, width: u16) -> (u16, u16) {
+    let max_width = width.max(1) as usize;
+    let mut row = 0u16;
+    let mut col = 0u16;
+    let mut count = 0usize;
+    for ch in input.chars() {
+        if count >= cursor {
+            break;
+        }
+        if ch == '\n' {
+            row = row.saturating_add(1);
+            col = 0;
+        } else {
+            col = col.saturating_add(1);
+            if col as usize >= max_width {
+                row = row.saturating_add(1);
+                col = 0;
+            }
+        }
+        count += 1;
+    }
+    (row, col)
+}
+
 fn format_separator(label: &str, width: u16) -> String {
     let content_width = width as usize;
     let label_width = label.len();
@@ -1058,7 +1159,10 @@ fn run_app(
 
                 let right_chunks = Layout::default()
                     .direction(Direction::Vertical)
-                    .constraints([Constraint::Min(3), Constraint::Length(3)])
+                    .constraints([
+                        Constraint::Min(3),
+                        Constraint::Length(if app.input_multiline { 5 } else { 3 }),
+                    ])
                     .split(main_chunks[1]);
 
                 let channels: Vec<ListItem> = app
@@ -1103,15 +1207,17 @@ fn run_app(
 
                 render_messages_area(f, right_chunks[0], &mut app);
                 let input = Paragraph::new(app.input.as_str())
-                    .block(Block::default().borders(Borders::ALL).title("Input"));
-
+                    .block(Block::default().borders(Borders::ALL).title("Input"))
+                    .wrap(Wrap { trim: false });
                 f.render_widget(input, right_chunks[1]);
                 let input_area = right_chunks[1];
                 let x = input_area.x + 1;
                 let y = input_area.y + 1;
-                let max_width = input_area.width.saturating_sub(2) as usize;
-                let cursor_x = x + (app.input.len().min(max_width) as u16);
-                f.set_cursor(cursor_x, y);
+                let inner_width = input_area.width.saturating_sub(2);
+                let (row, col) = cursor_position(&app.input, app.input_cursor, inner_width);
+                let cursor_y = y.saturating_add(row).min(input_area.y + input_area.height - 2);
+                let cursor_x = x + col.min(inner_width.saturating_sub(1));
+                f.set_cursor(cursor_x, cursor_y);
             }
 
             if let Some(ref prompt) = app.prompt {
@@ -1170,6 +1276,9 @@ fn run_app(
                             let _ = cmd_tx.send(MatrixCommand::StartVerification);
                             app.show_verification_status("Waiting for verification...");
                         }
+                        KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
+                            app.input_multiline = !app.input_multiline;
+                        }
                         KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             if app.selected_room_is_invited() {
                                 if let Some(room_id) = app.selected_room_id() {
@@ -1223,7 +1332,9 @@ fn run_app(
                             }
                         }
                         KeyCode::Enter => {
-                            if app.input.trim().is_empty() {
+                            if app.input_multiline {
+                                app.input_insert_char('\n');
+                            } else if app.input.trim().is_empty() {
                                 if let Some(path) = app.selected_attachment_path() {
                                     let _ = open_path(Path::new(&path));
                                 } else {
@@ -1244,10 +1355,22 @@ fn run_app(
                             app.on_copy_message();
                         }
                         KeyCode::Backspace => {
-                            app.input.pop();
+                            app.input_backspace();
+                        }
+                        KeyCode::Left if key.modifiers.contains(KeyModifiers::ALT) => {
+                            app.input_move_word_left();
+                        }
+                        KeyCode::Right if key.modifiers.contains(KeyModifiers::ALT) => {
+                            app.input_move_word_right();
+                        }
+                        KeyCode::Left => {
+                            app.input_move_left();
+                        }
+                        KeyCode::Right => {
+                            app.input_move_right();
                         }
                         KeyCode::Char(c) => {
-                            app.input.push(c);
+                            app.input_insert_char(c);
                         }
                         _ => {}
                     }

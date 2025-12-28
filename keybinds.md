@@ -10,7 +10,10 @@
         Alt+V Start verification (SAS).
     Message input
         enter when input box empty in single-line mode Open URL or attachment from selected message.
-        enter otherwise Send message.
+        enter otherwise Send message (single-line) or insert newline (multi-line).
+        alt+enter Toggle multi-line input.
+        left/right Move cursor in input.
+        alt+left/alt+right Jump word in input.
     Message/channel selection
         esc Reset message selection or close channel selection popup.
         alt+Up Select previous message.
