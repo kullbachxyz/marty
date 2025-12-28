@@ -5,6 +5,7 @@ mod storage;
 use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::{self, Write};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -68,11 +69,13 @@ enum MessageItem {
     Separator(String),
     Message {
         time: String,
+        sender_id: String,
         name: String,
         text: String,
     },
     Attachment {
         time: String,
+        sender_id: String,
         name: String,
         label: String,
         filename: String,
@@ -578,6 +581,7 @@ impl App {
         }
         entry.push(MessageItem::Message {
             time: format_timestamp(ts),
+            sender_id: sender.to_string(),
             name: format_sender(sender),
             text: body.to_string(),
         });
@@ -610,6 +614,7 @@ impl App {
         }
         entry.push(MessageItem::Attachment {
             time: format_timestamp(ts),
+            sender_id: sender.to_string(),
             name: format_sender(sender),
             label: label.to_string(),
             filename: filename.to_string(),
@@ -665,7 +670,7 @@ fn prompt_password(label: &str) -> io::Result<String> {
 fn msg_string(item: &MessageItem) -> String {
     match item {
         MessageItem::Separator(label) => format!("==== {} ====", label),
-        MessageItem::Message { time, name, text } => {
+        MessageItem::Message { time, name, text, .. } => {
             format!("{} {}: {}", time, name, text)
         }
         MessageItem::Attachment {
@@ -674,6 +679,7 @@ fn msg_string(item: &MessageItem) -> String {
             label,
             filename,
             path,
+            ..
         } => {
             format!("{} {}: [{}] {} ({})", time, name, label, filename, path)
         }
@@ -721,20 +727,21 @@ fn render_messages_area(
                 draw_plain_line(buf, inner, y, &line, selected);
                 y = y.saturating_add(1);
             }
-            MessageItem::Message { time, name, text } => {
-                let spans = message_spans(time, name, text);
+            MessageItem::Message { time, name, sender_id, text } => {
+                let spans = message_spans(time, name, sender_id, app.own_user_id.as_deref(), text);
                 draw_spans_line(buf, inner, y, &spans, selected);
                 y = y.saturating_add(1);
             }
             MessageItem::Attachment {
                 time,
                 name,
+                sender_id,
                 label,
                 filename,
                 ..
             } => {
                 let text = format!("[{}] {}", label, filename);
-                let spans = message_spans(time, name, &text);
+                let spans = message_spans(time, name, sender_id, app.own_user_id.as_deref(), &text);
                 draw_spans_line(buf, inner, y, &spans, selected);
                 y = y.saturating_add(1);
             }
@@ -781,16 +788,18 @@ fn format_separator(label: &str, width: u16) -> String {
     format!("{} {} {}", "=".repeat(left), label, "=".repeat(right))
 }
 
-fn message_spans(time: &str, name: &str, text: &str) -> Vec<Span<'static>> {
+fn message_spans(
+    time: &str,
+    name: &str,
+    sender_id: &str,
+    own_user_id: Option<&str>,
+    text: &str,
+) -> Vec<Span<'static>> {
     let time_span = Span::styled(
         format!("{} ", time),
         Style::default().fg(Color::Rgb(238, 193, 99)),
     );
-    let name_color = if name == "You" {
-        Color::Rgb(180, 140, 210)
-    } else {
-        Color::Rgb(109, 188, 226)
-    };
+    let name_color = color_for_sender(sender_id, own_user_id);
     let name_span = Span::styled(
         format!("{}: ", name),
         Style::default()
@@ -799,6 +808,34 @@ fn message_spans(time: &str, name: &str, text: &str) -> Vec<Span<'static>> {
     );
     let text_span = Span::raw(text.to_string());
     vec![time_span, name_span, text_span]
+}
+
+fn color_for_sender(sender_id: &str, own_user_id: Option<&str>) -> Color {
+    if is_own_sender(sender_id, own_user_id) {
+        return Color::Rgb(180, 140, 210);
+    }
+    let palette = [
+        Color::Rgb(109, 188, 226),
+        Color::Rgb(140, 210, 180),
+        Color::Rgb(232, 182, 113),
+        Color::Rgb(198, 140, 210),
+        Color::Rgb(220, 150, 150),
+        Color::Rgb(120, 200, 140),
+    ];
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    sender_id.hash(&mut hasher);
+    let idx = (hasher.finish() as usize) % palette.len();
+    palette[idx]
+}
+
+fn is_own_sender(sender_id: &str, own_user_id: Option<&str>) -> bool {
+    let Some(own) = own_user_id else {
+        return false;
+    };
+    if sender_id == own {
+        return true;
+    }
+    format_sender(sender_id) == format_sender(own)
 }
 
 fn draw_plain_line(buf: &mut Buffer, area: Rect, y: u16, text: &str, selected: bool) {
