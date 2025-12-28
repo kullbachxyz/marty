@@ -34,12 +34,14 @@ sudo cp target/release/marty /usr/local/bin/
 ```
 
 ## ToDo
-- [ ] multi account support
+- [ ] AUR release
 - [ ] Project Page
 - [x] improve help page
 - [x] Desktop notification support
 - [x] Reply to message
-- [ ] Persist [accounts.session_encrypted] in the DB
+- [ ] Typing indicators
+- [ ] Read receipts
+- [ ] Attachment send
 - [x] Attachment support (xdg-open)
 - [ ] User verification support
 - [x] Message Input Editing
