@@ -6,6 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::{self, Write};
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -47,7 +48,7 @@ const HELP_LINES: [&str; 21] = [
     "  Ctrl+D Decline invite.",
     "  Alt+V Start verification (SAS).",
     "Message input",
-    "  Enter when input box empty in single-line mode Open URL from selected message.",
+    "  Enter when input box empty in single-line mode Open URL or attachment from selected message.",
     "  Enter otherwise Send message.",
     "Message/channel selection",
     "  Esc Reset message selection or close help panel.",
@@ -66,6 +67,13 @@ enum MessageItem {
         time: String,
         name: String,
         text: String,
+    },
+    Attachment {
+        time: String,
+        name: String,
+        label: String,
+        filename: String,
+        path: String,
     },
 }
 
@@ -337,6 +345,15 @@ impl App {
         )
     }
 
+    fn selected_attachment_path(&self) -> Option<String> {
+        let idx = self.message_selected?;
+        let messages = self.current_messages()?;
+        match messages.get(idx) {
+            Some(MessageItem::Attachment { path, .. }) => Some(path.clone()),
+            _ => None,
+        }
+    }
+
     fn current_messages(&self) -> Option<&Vec<MessageItem>> {
         let room_id = self.selected_room_id()?;
         self.messages_by_room.get(&room_id)
@@ -387,6 +404,40 @@ impl App {
             *entry = entry.saturating_add(1);
         }
         self.push_message_with_time(room_id, event_id, ts, sender, body);
+        if is_selected {
+            self.mark_room_read(room_id);
+        }
+    }
+
+    fn handle_incoming_attachment(
+        &mut self,
+        room_id: &str,
+        event_id: Option<&str>,
+        ts: i64,
+        sender: &str,
+        label: &str,
+        filename: &str,
+        path: &str,
+    ) {
+        let is_selected = self
+            .selected_room_id()
+            .as_deref()
+            .map(|id| id == room_id)
+            .unwrap_or(false);
+        let last_seen = *self.last_seen_ts.get(room_id).unwrap_or(&0);
+        if !is_selected && ts > last_seen {
+            let entry = self.unread_counts.entry(room_id.to_string()).or_default();
+            *entry = entry.saturating_add(1);
+        }
+        self.push_attachment_with_time(
+            room_id,
+            event_id,
+            ts,
+            sender,
+            label,
+            filename,
+            path,
+        );
         if is_selected {
             self.mark_room_read(room_id);
         }
@@ -456,6 +507,40 @@ impl App {
         self.last_message_ts
             .insert(room_id.to_string(), ts);
     }
+
+    fn push_attachment_with_time(
+        &mut self,
+        room_id: &str,
+        event_id: Option<&str>,
+        ts: i64,
+        sender: &str,
+        label: &str,
+        filename: &str,
+        path: &str,
+    ) {
+        if let Some(event_id) = event_id {
+            let seen = self.seen_event_ids.entry(room_id.to_string()).or_default();
+            if !seen.insert(event_id.to_string()) {
+                return;
+            }
+        }
+        let date = format_date(ts);
+        let entry = self.messages_by_room.entry(room_id.to_string()).or_default();
+        let last_date = self.last_date_by_room.entry(room_id.to_string()).or_default();
+        if last_date != &date {
+            entry.push(MessageItem::Separator(date.clone()));
+            *last_date = date;
+        }
+        entry.push(MessageItem::Attachment {
+            time: format_timestamp(ts),
+            name: format_sender(sender),
+            label: label.to_string(),
+            filename: filename.to_string(),
+            path: path.to_string(),
+        });
+        self.last_message_ts
+            .insert(room_id.to_string(), ts);
+    }
 }
 
 fn format_timestamp(ts: i64) -> String {
@@ -506,6 +591,15 @@ fn msg_string(item: &MessageItem) -> String {
         MessageItem::Message { time, name, text } => {
             format!("{} {}: {}", time, name, text)
         }
+        MessageItem::Attachment {
+            time,
+            name,
+            label,
+            filename,
+            path,
+        } => {
+            format!("{} {}: [{}] {} ({})", time, name, label, filename, path)
+        }
     }
 }
 
@@ -552,6 +646,18 @@ fn render_messages_area(
             }
             MessageItem::Message { time, name, text } => {
                 let spans = message_spans(time, name, text);
+                draw_spans_line(buf, inner, y, &spans, selected);
+                y = y.saturating_add(1);
+            }
+            MessageItem::Attachment {
+                time,
+                name,
+                label,
+                filename,
+                ..
+            } => {
+                let text = format!("[{}] {}", label, filename);
+                let spans = message_spans(time, name, &text);
                 draw_spans_line(buf, inner, y, &spans, selected);
                 y = y.saturating_add(1);
             }
@@ -698,6 +804,24 @@ fn open_url(url: &str) -> bool {
     }
 }
 
+fn open_path(path: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        return Command::new("cmd")
+            .args(["/C", "start", "", &path.display().to_string()])
+            .spawn()
+            .is_ok();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        return Command::new("open").arg(path).spawn().is_ok();
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        return Command::new("xdg-open").arg(path).spawn().is_ok();
+    }
+}
+
 fn notify_send(title: &str, body: &str) {
     let _ = Command::new("notify-send")
         .arg(title)
@@ -806,13 +930,33 @@ fn run_app(
                 records.sort_by_key(|m| m.timestamp);
                 for record in records {
                     let room_id = room_key.replace('_', ":");
-                    app.push_message_with_time(
-                        &room_id,
-                        record.event_id.as_deref(),
-                        record.timestamp,
-                        &record.sender,
-                        &record.body,
-                    );
+                    if let Some(path) = record.attachment_path.as_deref() {
+                        let label = record
+                            .attachment_kind
+                            .as_deref()
+                            .unwrap_or("file");
+                        let name = record
+                            .attachment_name
+                            .as_deref()
+                            .unwrap_or(&record.body);
+                        app.push_attachment_with_time(
+                            &room_id,
+                            record.event_id.as_deref(),
+                            record.timestamp,
+                            &record.sender,
+                            label,
+                            name,
+                            path,
+                        );
+                    } else {
+                        app.push_message_with_time(
+                            &room_id,
+                            record.event_id.as_deref(),
+                            record.timestamp,
+                            &record.sender,
+                            &record.body,
+                        );
+                    }
                 }
             }
             for (room_id, ts) in app.last_message_ts.clone() {
@@ -841,6 +985,30 @@ fn run_app(
                     );
                     if app.should_notify(&room_id, &sender) {
                         let title = format!("{} — {}", app.room_name(&room_id), format_sender(&sender));
+                        notify_send(&title, &body);
+                    }
+                }
+                MatrixEvent::Attachment {
+                    room_id,
+                    event_id,
+                    sender,
+                    name,
+                    path,
+                    kind,
+                    timestamp,
+                } => {
+                    app.handle_incoming_attachment(
+                        &room_id,
+                        Some(&event_id),
+                        timestamp,
+                        &sender,
+                        &kind,
+                        &name,
+                        &path,
+                    );
+                    if app.should_notify(&room_id, &sender) {
+                        let title = format!("{} — {}", app.room_name(&room_id), format_sender(&sender));
+                        let body = format!("[{}] {}", kind, name);
                         notify_send(&title, &body);
                     }
                 }
@@ -1056,7 +1224,11 @@ fn run_app(
                         }
                         KeyCode::Enter => {
                             if app.input.trim().is_empty() {
-                                app.on_open_url();
+                                if let Some(path) = app.selected_attachment_path() {
+                                    let _ = open_path(Path::new(&path));
+                                } else {
+                                    app.on_open_url();
+                                }
                             } else if let Some(text) = app.on_enter() {
                                 if let Some(cmd) = parse_command(&text) {
                                     let _ = cmd_tx.send(cmd);

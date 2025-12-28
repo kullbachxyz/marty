@@ -9,7 +9,7 @@
         Ctrl+D Decline invite.
         Alt+V Start verification (SAS).
     Message input
-        enter when input box empty in single-line mode Open URL from selected message.
+        enter when input box empty in single-line mode Open URL or attachment from selected message.
         enter otherwise Send message.
     Message/channel selection
         esc Reset message selection or close channel selection popup.

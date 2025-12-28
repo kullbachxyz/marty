@@ -3,6 +3,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use matrix_sdk::matrix_auth::MatrixSession;
+use chrono::Local;
 use serde::{Deserialize, Serialize};
 
 use crate::storage::{decrypt_value, encrypt_value, EncryptedValue};
@@ -47,6 +48,13 @@ pub fn crypto_dir() -> io::Result<PathBuf> {
 
 pub fn messages_dir() -> io::Result<PathBuf> {
     let dir = data_dir()?.join("messages");
+    fs::create_dir_all(&dir)?;
+    Ok(dir)
+}
+
+pub fn attachments_dir() -> io::Result<PathBuf> {
+    let date = Local::now().format("%Y-%m-%d").to_string();
+    let dir = data_dir()?.join("attachments").join(date);
     fs::create_dir_all(&dir)?;
     Ok(dir)
 }

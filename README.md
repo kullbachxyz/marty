@@ -12,6 +12,7 @@ A Matrix TUI client inspired by gurk-rs.
 - Backfill messages since last run
 - Unread counts per channel
 - Desktop notifications via `notify-send`
+- Attachment downloads with `xdg-open`
 
 ## Installation
 - Install Rust (stable) and Cargo
@@ -32,7 +33,7 @@ sudo cp target/release/marty /usr/local/bin/
 - [ ] improve help page
 - [x] Desktop notification support
 - [ ] Persist [accounts.session_encrypted] in the DB
-- [ ] Attachment support (xdg-open)
+- [x] Attachment support (xdg-open)
 - [ ] User verification support
 - [ ] Message Input Editing
 - [x] Backfill messages since last run
@@ -61,3 +62,4 @@ marty/
 - `~/.config/marty/config` Config file (accounts, active profile, encrypted session blob).
 - `~/.local/share/marty/crypto/` Matrix SDK encrypted crypto store (keys, device state).
 - `~/.local/share/marty/messages/` Encrypted local message archive per room.
+- `~/.local/share/marty/attachments/<date>/` Downloaded attachments by date.
