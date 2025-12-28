@@ -37,31 +37,32 @@ use crate::matrix::{
 use crate::storage::load_all_messages;
 
 const TICK_RATE: Duration = Duration::from_millis(100);
-const HELP_LINES: [&str; 24] = [
+const HELP_LINES: [&str; 25] = [
     "App navigation",
-    "  F1 Toggle help panel showing shortcuts.",
-    "  Up One Channel Up",
-    "  Down One Channel Down",
-    "  Alt+A Add chat (room or user).",
-    "  Alt+J Join/add chat (room or user).",
-    "  Alt+D Delete chat (type DELETE to confirm).",
-    "  Ctrl+A Accept invite.",
-    "  Ctrl+D Decline invite.",
-    "  Alt+V Start verification (SAS).",
+    "  Alt+Q\tQuit.",
+    "  F1\tToggle help panel showing shortcuts.",
+    "  Up\tOne Channel Up",
+    "  Down\tOne Channel Down",
+    "  Alt+A\tAdd chat (room or user).",
+    "  Alt+J\tJoin/add chat (room or user).",
+    "  Alt+D\tDelete chat (type DELETE to confirm).",
+    "  Ctrl+A\tAccept invite.",
+    "  Ctrl+D\tDecline invite.",
+    "  Alt+V\tStart verification (SAS).",
     "Message input",
-    "  Enter when input box empty in single-line mode Open URL or attachment from selected message.",
-    "  Enter otherwise Send message (single-line) or insert newline (multi-line).",
-    "  Alt+Enter Toggle multi-line input.",
-    "  Left/Right Move cursor in input.",
-    "  Alt+Left/Right Jump word in input.",
+    "  Enter\tWhen input empty (single-line): open URL/attachment.",
+    "  Enter\tSend message (single-line) or insert newline (multi-line).",
+    "  Alt+Enter\tToggle multi-line input.",
+    "  Left/Right\tMove cursor in input.",
+    "  Alt+Left/Right\tJump word in input.",
     "Message/channel selection",
-    "  Esc Reset message selection or close help panel.",
-    "  Alt+Up Select previous message.",
-    "  Alt+Down Select next message.",
+    "  Esc\tReset message selection or close help panel.",
+    "  Alt+Up\tSelect previous message.",
+    "  Alt+Down\tSelect next message.",
     "Clipboard",
-    "  Alt+Y Copy selected message to clipboard.",
+    "  Alt+Y\tCopy selected message to clipboard.",
     "Help menu",
-    "  Esc Close help panel. Up/Down/PageDown Scroll.",
+    "  Esc\tClose help panel. Up/Down/PageDown scroll.",
 ];
 
 #[derive(Clone)]
@@ -749,6 +750,16 @@ fn render_messages_area(
     }
 }
 
+fn format_help_line(line: &str) -> String {
+    const KEY_COL: usize = 18;
+    let Some((left, right)) = line.split_once('\t') else {
+        return line.to_string();
+    };
+    let left_len = left.len();
+    let pad = if left_len >= KEY_COL { 1 } else { KEY_COL - left_len };
+    format!("{}{}{}", left, " ".repeat(pad), right)
+}
+
 fn cursor_position(input: &str, cursor: usize, width: u16) -> (u16, u16) {
     let max_width = width.max(1) as usize;
     let mut row = 0u16;
@@ -1181,7 +1192,19 @@ fn run_app(
             if app.help_open {
                 let help_lines: Vec<Line> = HELP_LINES
                     .iter()
-                    .map(|line| Line::from(Span::raw(*line)))
+                    .map(|line| {
+                        let rendered = format_help_line(line);
+                        if line.starts_with(' ') || line.is_empty() {
+                            Line::from(Span::raw(rendered))
+                        } else {
+                            Line::from(Span::styled(
+                                rendered,
+                                Style::default()
+                                    .fg(Color::Rgb(140, 200, 220))
+                                    .add_modifier(Modifier::BOLD),
+                            ))
+                        }
+                    })
                     .collect();
                 let help = Paragraph::new(help_lines)
                     .block(Block::default().borders(Borders::ALL).title("Help"))
@@ -1289,7 +1312,9 @@ fn run_app(
                         continue;
                     }
                     match key.code {
-                        KeyCode::Char('q') => app.should_quit = true,
+                        KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::ALT) => {
+                            app.should_quit = true
+                        }
                         KeyCode::F(1) => app.toggle_help(),
                         KeyCode::Esc => {
                             if app.verification_status.is_some()

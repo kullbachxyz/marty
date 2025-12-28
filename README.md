@@ -13,11 +13,16 @@ A Matrix TUI client inspired by gurk-rs.
 - Unread counts per channel
 - Desktop notifications via `notify-send`
 - Attachment downloads with `xdg-open`
+- Input editing with multi-line mode, cursor movement, and word jumps
 
 ## Installation
 - Install Rust (stable) and Cargo
 - Build and run:
   - `cargo run`
+
+## First Run
+- Enter a passphrase to encrypt the local store.
+- Provide homeserver URL, username, and password.
 
 ### Building from Source
 ```text
@@ -30,8 +35,9 @@ sudo cp target/release/marty /usr/local/bin/
 ## ToDo
 - [ ] multi account support
 - [ ] Project Page
-- [ ] improve help page
+- [x] improve help page
 - [x] Desktop notification support
+- [ ] Reply to specific message
 - [ ] Persist [accounts.session_encrypted] in the DB
 - [x] Attachment support (xdg-open)
 - [ ] User verification support
