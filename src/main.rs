@@ -73,6 +73,8 @@ enum MessageItem {
         sender_id: String,
         name: String,
         text: String,
+        event_id: Option<String>,
+        reply_to: Option<String>,
     },
     Attachment {
         time: String,
@@ -81,6 +83,8 @@ enum MessageItem {
         label: String,
         filename: String,
         path: String,
+        event_id: Option<String>,
+        reply_to: Option<String>,
     },
 }
 
@@ -94,12 +98,18 @@ struct PromptState {
     input: String,
 }
 
+struct ReplyPreview {
+    sender: String,
+    text: String,
+}
+
 struct App {
     rooms: Vec<RoomInfo>,
     selected: usize,
     messages_by_room: HashMap<String, Vec<MessageItem>>,
     last_date_by_room: HashMap<String, String>,
     seen_event_ids: HashMap<String, HashSet<String>>,
+    reply_index: HashMap<String, HashMap<String, ReplyPreview>>,
     last_message_ts: HashMap<String, i64>,
     last_seen_ts: HashMap<String, i64>,
     unread_counts: HashMap<String, usize>,
@@ -127,6 +137,7 @@ impl App {
             messages_by_room: HashMap::new(),
             last_date_by_room: HashMap::new(),
             seen_event_ids: HashMap::new(),
+            reply_index: HashMap::new(),
             last_message_ts: HashMap::new(),
             last_seen_ts: HashMap::new(),
             unread_counts: HashMap::new(),
@@ -426,11 +437,27 @@ impl App {
         )
     }
 
+    fn reply_preview(&self, room_id: &str, reply_to: &str) -> Option<&ReplyPreview> {
+        self.reply_index
+            .get(room_id)
+            .and_then(|map| map.get(reply_to))
+    }
+
     fn selected_attachment_path(&self) -> Option<String> {
         let idx = self.message_selected?;
         let messages = self.current_messages()?;
         match messages.get(idx) {
             Some(MessageItem::Attachment { path, .. }) => Some(path.clone()),
+            _ => None,
+        }
+    }
+
+    fn selected_message_event_id(&self) -> Option<String> {
+        let idx = self.message_selected?;
+        let messages = self.current_messages()?;
+        match messages.get(idx) {
+            Some(MessageItem::Message { event_id, .. }) => event_id.clone(),
+            Some(MessageItem::Attachment { event_id, .. }) => event_id.clone(),
             _ => None,
         }
     }
@@ -453,6 +480,9 @@ impl App {
             self.seen_event_ids
                 .entry(room.room_id.clone())
                 .or_default();
+            self.reply_index
+                .entry(room.room_id.clone())
+                .or_default();
             self.unread_counts.entry(room.room_id.clone()).or_default();
             self.last_seen_ts.entry(room.room_id.clone()).or_default();
             self.last_message_ts.entry(room.room_id.clone()).or_default();
@@ -473,6 +503,7 @@ impl App {
         ts: i64,
         sender: &str,
         body: &str,
+        reply_to: Option<&str>,
     ) {
         let is_selected = self
             .selected_room_id()
@@ -484,7 +515,7 @@ impl App {
             let entry = self.unread_counts.entry(room_id.to_string()).or_default();
             *entry = entry.saturating_add(1);
         }
-        self.push_message_with_time(room_id, event_id, ts, sender, body);
+        self.push_message_with_time(room_id, event_id, ts, sender, body, reply_to);
         if is_selected {
             self.mark_room_read(room_id);
         }
@@ -499,6 +530,7 @@ impl App {
         label: &str,
         filename: &str,
         path: &str,
+        reply_to: Option<&str>,
     ) {
         let is_selected = self
             .selected_room_id()
@@ -518,6 +550,7 @@ impl App {
             label,
             filename,
             path,
+            reply_to,
         );
         if is_selected {
             self.mark_room_read(room_id);
@@ -566,6 +599,7 @@ impl App {
         ts: i64,
         sender: &str,
         body: &str,
+        reply_to: Option<&str>,
     ) {
         if let Some(event_id) = event_id {
             let seen = self.seen_event_ids.entry(room_id.to_string()).or_default();
@@ -585,7 +619,19 @@ impl App {
             sender_id: sender.to_string(),
             name: format_sender(sender),
             text: body.to_string(),
+            event_id: event_id.map(|id| id.to_string()),
+            reply_to: reply_to.map(|id| id.to_string()),
         });
+        if let Some(event_id) = event_id {
+            let previews = self.reply_index.entry(room_id.to_string()).or_default();
+            previews.insert(
+                event_id.to_string(),
+                ReplyPreview {
+                    sender: format_sender(sender),
+                    text: body.to_string(),
+                },
+            );
+        }
         self.last_message_ts
             .insert(room_id.to_string(), ts);
     }
@@ -599,6 +645,7 @@ impl App {
         label: &str,
         filename: &str,
         path: &str,
+        reply_to: Option<&str>,
     ) {
         if let Some(event_id) = event_id {
             let seen = self.seen_event_ids.entry(room_id.to_string()).or_default();
@@ -620,7 +667,19 @@ impl App {
             label: label.to_string(),
             filename: filename.to_string(),
             path: path.to_string(),
+            event_id: event_id.map(|id| id.to_string()),
+            reply_to: reply_to.map(|id| id.to_string()),
         });
+        if let Some(event_id) = event_id {
+            let previews = self.reply_index.entry(room_id.to_string()).or_default();
+            previews.insert(
+                event_id.to_string(),
+                ReplyPreview {
+                    sender: format_sender(sender),
+                    text: format!("[{}] {}", label, filename),
+                },
+            );
+        }
         self.last_message_ts
             .insert(room_id.to_string(), ts);
     }
@@ -708,6 +767,7 @@ fn render_messages_area(
     if inner.width == 0 || inner.height == 0 {
         return;
     }
+    let room_id = app.selected_room_id();
     if let Some(room) = app.selected_room() {
         if room.state == RoomListState::Invited {
             let inviter = room.inviter.as_deref().unwrap_or("Unknown user");
@@ -738,10 +798,44 @@ fn render_messages_area(
                 draw_plain_line(buf, inner, y, &line, selected);
                 y = y.saturating_add(1);
             }
-            MessageItem::Message { time, name, sender_id, text } => {
-                let spans = message_spans(time, name, sender_id, app.own_user_id.as_deref(), text);
-                draw_spans_line(buf, inner, y, &spans, selected);
-                y = y.saturating_add(1);
+            MessageItem::Message {
+                time,
+                name,
+                sender_id,
+                text,
+                reply_to,
+                ..
+            } => {
+                if let (Some(reply_id), Some(room_id)) = (reply_to.as_deref(), room_id.as_deref())
+                {
+                    let preview = app.reply_preview(room_id, reply_id);
+                    let reply_text = preview
+                        .map(|p| format!("> ({}) {}", p.sender, p.text))
+                        .unwrap_or_else(|| "> (unknown)".to_string());
+                    let mut spans =
+                        message_spans(time, name, sender_id, app.own_user_id.as_deref(), "");
+                    spans.push(Span::styled(
+                        reply_text,
+                        Style::default().fg(Color::Rgb(150, 150, 150)),
+                    ));
+                    draw_spans_line(buf, inner, y, &spans, selected);
+                    y = y.saturating_add(1);
+                    if y >= max_y {
+                        break;
+                    }
+                    let prefix = format!("{} {}: ", time, name);
+                    let text_line = vec![
+                        Span::raw(" ".repeat(prefix.len())),
+                        Span::raw(text.to_string()),
+                    ];
+                    draw_spans_line(buf, inner, y, &text_line, selected);
+                    y = y.saturating_add(1);
+                } else {
+                    let spans =
+                        message_spans(time, name, sender_id, app.own_user_id.as_deref(), text);
+                    draw_spans_line(buf, inner, y, &spans, selected);
+                    y = y.saturating_add(1);
+                }
             }
             MessageItem::Attachment {
                 time,
@@ -749,12 +843,40 @@ fn render_messages_area(
                 sender_id,
                 label,
                 filename,
+                reply_to,
                 ..
             } => {
                 let text = format!("[{}] {}", label, filename);
-                let spans = message_spans(time, name, sender_id, app.own_user_id.as_deref(), &text);
-                draw_spans_line(buf, inner, y, &spans, selected);
-                y = y.saturating_add(1);
+                if let (Some(reply_id), Some(room_id)) = (reply_to.as_deref(), room_id.as_deref())
+                {
+                    let preview = app.reply_preview(room_id, reply_id);
+                    let reply_text = preview
+                        .map(|p| format!("> ({}) {}", p.sender, p.text))
+                        .unwrap_or_else(|| "> (unknown)".to_string());
+                    let mut spans =
+                        message_spans(time, name, sender_id, app.own_user_id.as_deref(), "");
+                    spans.push(Span::styled(
+                        reply_text,
+                        Style::default().fg(Color::Rgb(150, 150, 150)),
+                    ));
+                    draw_spans_line(buf, inner, y, &spans, selected);
+                    y = y.saturating_add(1);
+                    if y >= max_y {
+                        break;
+                    }
+                    let prefix = format!("{} {}: ", time, name);
+                    let text_line = vec![
+                        Span::raw(" ".repeat(prefix.len())),
+                        Span::raw(text.to_string()),
+                    ];
+                    draw_spans_line(buf, inner, y, &text_line, selected);
+                    y = y.saturating_add(1);
+                } else {
+                    let spans =
+                        message_spans(time, name, sender_id, app.own_user_id.as_deref(), &text);
+                    draw_spans_line(buf, inner, y, &spans, selected);
+                    y = y.saturating_add(1);
+                }
             }
         }
     }
@@ -1106,6 +1228,7 @@ fn run_app(
                             label,
                             name,
                             path,
+                            record.reply_to.as_deref(),
                         );
                     } else {
                         app.push_message_with_time(
@@ -1114,6 +1237,7 @@ fn run_app(
                             record.timestamp,
                             &record.sender,
                             &record.body,
+                            record.reply_to.as_deref(),
                         );
                     }
                 }
@@ -1134,6 +1258,7 @@ fn run_app(
                     sender,
                     body,
                     timestamp,
+                    reply_to,
                 } => {
                     app.handle_incoming_message(
                         &room_id,
@@ -1141,6 +1266,7 @@ fn run_app(
                         timestamp,
                         &sender,
                         &body,
+                        reply_to.as_deref(),
                     );
                     if app.should_notify(&room_id, &sender) {
                         let title = format!("{} — {}", app.room_name(&room_id), format_sender(&sender));
@@ -1155,6 +1281,7 @@ fn run_app(
                     path,
                     kind,
                     timestamp,
+                    reply_to,
                 } => {
                     app.handle_incoming_attachment(
                         &room_id,
@@ -1164,6 +1291,7 @@ fn run_app(
                         &kind,
                         &name,
                         &path,
+                        reply_to.as_deref(),
                     );
                     if app.should_notify(&room_id, &sender) {
                         let title = format!("{} — {}", app.room_name(&room_id), format_sender(&sender));
@@ -1419,7 +1547,13 @@ fn run_app(
                                     if app.selected_room_is_invited() {
                                         continue;
                                     }
-                                    let _ = cmd_tx.send(MatrixCommand::SendMessage { room_id, body: text });
+                                    let reply_to = app.selected_message_event_id();
+                                    let _ = cmd_tx.send(MatrixCommand::SendMessage {
+                                        room_id,
+                                        body: text,
+                                        reply_to,
+                                    });
+                                    app.message_selected = None;
                                 }
                             }
                         }

@@ -38,7 +38,7 @@ sudo cp target/release/marty /usr/local/bin/
 - [ ] Project Page
 - [x] improve help page
 - [x] Desktop notification support
-- [ ] Reply to specific message
+- [x] Reply to message
 - [ ] Persist [accounts.session_encrypted] in the DB
 - [x] Attachment support (xdg-open)
 - [ ] User verification support

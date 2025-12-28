@@ -2,8 +2,9 @@
 use anyhow::{Context, Result};
 use futures_util::StreamExt;
 use matrix_sdk::config::SyncSettings;
+use matrix_sdk::ruma::events::relation::InReplyTo;
 use matrix_sdk::ruma::events::room::{
-    message::{MessageType, OriginalRoomMessageEvent, OriginalSyncRoomMessageEvent},
+    message::{MessageType, OriginalRoomMessageEvent, OriginalSyncRoomMessageEvent, Relation, RoomMessageEventContent},
     MediaSource,
 };
 use matrix_sdk::ruma::{uint, RoomId};
@@ -48,6 +49,7 @@ pub enum MatrixEvent {
         sender: String,
         body: String,
         timestamp: i64,
+        reply_to: Option<String>,
     },
     Attachment {
         room_id: String,
@@ -57,6 +59,7 @@ pub enum MatrixEvent {
         path: String,
         kind: String,
         timestamp: i64,
+        reply_to: Option<String>,
     },
     BackfillDone,
     VerificationStatus {
@@ -73,7 +76,11 @@ pub enum MatrixEvent {
 
 #[derive(Debug)]
 pub enum MatrixCommand {
-    SendMessage { room_id: String, body: String },
+    SendMessage {
+        room_id: String,
+        body: String,
+        reply_to: Option<String>,
+    },
     JoinRoom { room: String },
     CreateDirect { user_id: String },
     LeaveRoom { room_id: String },
@@ -151,6 +158,7 @@ pub async fn start_sync(
                 let event_id = ev.event_id.to_string();
                 let sender = ev.sender.to_string();
                 let ts = i64::from(ev.origin_server_ts.0);
+                let reply_to = extract_reply_to(&ev.content);
                 match &ev.content.msgtype {
                     MessageType::Text(text) => {
                         let body = text.body.clone();
@@ -160,6 +168,7 @@ pub async fn start_sync(
                             sender: sender.clone(),
                             body: body.clone(),
                             timestamp: ts,
+                            reply_to: reply_to.clone(),
                         });
                         let _ = store_message_encrypted(
                             &passphrase,
@@ -168,6 +177,7 @@ pub async fn start_sync(
                             &sender,
                             &body,
                             Some(&event_id),
+                            reply_to.as_deref(),
                             None,
                         );
                     }
@@ -182,6 +192,7 @@ pub async fn start_sync(
                             ts,
                             "image",
                             &content.body,
+                            reply_to.clone(),
                             content,
                         )
                         .await;
@@ -197,6 +208,7 @@ pub async fn start_sync(
                             ts,
                             "file",
                             &content.body,
+                            reply_to.clone(),
                             content,
                         )
                         .await;
@@ -212,6 +224,7 @@ pub async fn start_sync(
                             ts,
                             "video",
                             &content.body,
+                            reply_to.clone(),
                             content,
                         )
                         .await;
@@ -227,6 +240,7 @@ pub async fn start_sync(
                             ts,
                             "audio",
                             &content.body,
+                            reply_to.clone(),
                             content,
                         )
                         .await;
@@ -243,12 +257,21 @@ pub async fn start_sync(
 
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
-            MatrixCommand::SendMessage { room_id, body } => {
+            MatrixCommand::SendMessage {
+                room_id,
+                body,
+                reply_to,
+            } => {
                 if let Ok(room_id) = RoomId::parse(&room_id) {
                     if let Some(room) = client.get_room(&room_id) {
-                        let content = matrix_sdk::ruma::events::room::message::RoomMessageEventContent::text_plain(
-                            body.clone(),
-                        );
+                        let mut content = RoomMessageEventContent::text_plain(body.clone());
+                        if let Some(reply_to) = reply_to {
+                            if let Ok(event_id) = reply_to.parse() {
+                                content.relates_to = Some(Relation::Reply {
+                                    in_reply_to: InReplyTo::new(event_id),
+                                });
+                            }
+                        }
                         let _ = room.send(content).await;
                     }
                 }
@@ -422,6 +445,7 @@ enum BackfillItem {
         sender: String,
         body: String,
         timestamp: i64,
+        reply_to: Option<String>,
     },
     Attachment {
         event_id: String,
@@ -430,6 +454,7 @@ enum BackfillItem {
         path: String,
         kind: String,
         timestamp: i64,
+        reply_to: Option<String>,
     },
 }
 
@@ -477,13 +502,14 @@ async fn backfill_since_last_seen(
                     stop = true;
                     break;
                 }
-                match message.content.msgtype {
+                match &message.content.msgtype {
                     MessageType::Text(text) => {
                         collected.push(BackfillItem::Text {
                             event_id: message.event_id.to_string(),
                             sender: message.sender.to_string(),
                             body: text.body.clone(),
                             timestamp: ts,
+                            reply_to: extract_reply_to(&message.content),
                         });
                     }
                     MessageType::Image(content) => {
@@ -494,7 +520,8 @@ async fn backfill_since_last_seen(
                             ts,
                             "image",
                             &content.body,
-                            &content,
+                            extract_reply_to(&message.content),
+                            content,
                         )
                         .await
                         {
@@ -509,7 +536,8 @@ async fn backfill_since_last_seen(
                             ts,
                             "file",
                             &content.body,
-                            &content,
+                            extract_reply_to(&message.content),
+                            content,
                         )
                         .await
                         {
@@ -524,7 +552,8 @@ async fn backfill_since_last_seen(
                             ts,
                             "video",
                             &content.body,
-                            &content,
+                            extract_reply_to(&message.content),
+                            content,
                         )
                         .await
                         {
@@ -539,7 +568,8 @@ async fn backfill_since_last_seen(
                             ts,
                             "audio",
                             &content.body,
-                            &content,
+                            extract_reply_to(&message.content),
+                            content,
                         )
                         .await
                         {
@@ -568,6 +598,7 @@ async fn backfill_since_last_seen(
                     sender,
                     body,
                     timestamp,
+                    reply_to,
                 } => {
                     let _ = evt_tx.send(MatrixEvent::Message {
                         room_id: room_id.clone(),
@@ -575,6 +606,7 @@ async fn backfill_since_last_seen(
                         sender: sender.clone(),
                         body: body.clone(),
                         timestamp,
+                        reply_to: reply_to.clone(),
                     });
                     let _ = store_message_encrypted(
                         passphrase,
@@ -583,6 +615,7 @@ async fn backfill_since_last_seen(
                         &sender,
                         &body,
                         Some(&event_id),
+                        reply_to.as_deref(),
                         None,
                     );
                 }
@@ -593,6 +626,7 @@ async fn backfill_since_last_seen(
                     path,
                     kind,
                     timestamp,
+                    reply_to,
                 } => {
                     let name_for_store = name.clone();
                     let name_for_attachment = name.clone();
@@ -605,6 +639,7 @@ async fn backfill_since_last_seen(
                         path: path.clone(),
                         kind: kind.clone(),
                         timestamp,
+                        reply_to: reply_to.clone(),
                     });
                     let _ = store_message_encrypted(
                         passphrase,
@@ -613,6 +648,7 @@ async fn backfill_since_last_seen(
                         &sender,
                         &name_for_store,
                         Some(&event_id),
+                        reply_to.as_deref(),
                         Some(AttachmentInfo {
                             kind,
                             name: name_for_attachment,
@@ -635,6 +671,7 @@ async fn handle_attachment_event<T: MediaEventContent + ?Sized>(
     ts: i64,
     kind: &str,
     body: &str,
+    reply_to: Option<String>,
     content: &T,
 ) {
     let Some(source) = content.source() else {
@@ -652,6 +689,7 @@ async fn handle_attachment_event<T: MediaEventContent + ?Sized>(
                 path: path_str.clone(),
                 kind: kind.to_string(),
                 timestamp: ts,
+                reply_to: reply_to.clone(),
             });
             let _ = store_message_encrypted(
                 passphrase,
@@ -660,6 +698,7 @@ async fn handle_attachment_event<T: MediaEventContent + ?Sized>(
                 sender,
                 &name,
                 Some(event_id),
+                reply_to.as_deref(),
                 Some(AttachmentInfo {
                     kind: kind.to_string(),
                     name: name.clone(),
@@ -675,6 +714,7 @@ async fn handle_attachment_event<T: MediaEventContent + ?Sized>(
                 sender: sender.to_string(),
                 body: fallback.clone(),
                 timestamp: ts,
+                reply_to: reply_to.clone(),
             });
             let _ = store_message_encrypted(
                 passphrase,
@@ -683,6 +723,7 @@ async fn handle_attachment_event<T: MediaEventContent + ?Sized>(
                 sender,
                 &fallback,
                 Some(event_id),
+                reply_to.as_deref(),
                 None,
             );
         }
@@ -696,6 +737,7 @@ async fn backfill_attachment<T: MediaEventContent + ?Sized>(
     ts: i64,
     kind: &str,
     body: &str,
+    reply_to: Option<String>,
     content: &T,
 ) -> Option<BackfillItem> {
     let Some(source) = content.source() else {
@@ -710,12 +752,14 @@ async fn backfill_attachment<T: MediaEventContent + ?Sized>(
             path: path.to_string_lossy().to_string(),
             kind: kind.to_string(),
             timestamp: ts,
+            reply_to,
         }),
         Err(_) => Some(BackfillItem::Text {
             event_id: event_id.to_string(),
             sender: sender.to_string(),
             body: format!("[{}] {}", kind, name),
             timestamp: ts,
+            reply_to,
         }),
     }
 }
@@ -740,6 +784,13 @@ fn attachment_name(body: &str, fallback: &str) -> String {
         fallback.to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+fn extract_reply_to(content: &RoomMessageEventContent) -> Option<String> {
+    match content.relates_to.as_ref() {
+        Some(Relation::Reply { in_reply_to }) => Some(in_reply_to.event_id.to_string()),
+        _ => None,
     }
 }
 
@@ -859,6 +910,7 @@ fn store_message_encrypted(
     sender: &str,
     body: &str,
     event_id: Option<&str>,
+    reply_to: Option<&str>,
     attachment: Option<AttachmentInfo>,
 ) -> Result<()> {
     let messages_dir = crate::config::messages_dir()?;
@@ -867,6 +919,7 @@ fn store_message_encrypted(
         sender: sender.to_string(),
         body: body.to_string(),
         event_id: event_id.map(|id| id.to_string()),
+        reply_to: reply_to.map(|id| id.to_string()),
         attachment_path: attachment.as_ref().map(|info| info.path.clone()),
         attachment_name: attachment.as_ref().map(|info| info.name.clone()),
         attachment_kind: attachment.map(|info| info.kind),

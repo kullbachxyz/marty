@@ -137,6 +137,8 @@ pub struct StoredMessage {
     #[serde(default)]
     pub event_id: Option<String>,
     #[serde(default)]
+    pub reply_to: Option<String>,
+    #[serde(default)]
     pub attachment_path: Option<String>,
     #[serde(default)]
     pub attachment_name: Option<String>,
