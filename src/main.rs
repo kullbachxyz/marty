@@ -975,12 +975,12 @@ fn format_help_line(line: &str) -> String {
 }
 
 fn reply_prefix(time: &str, name: &str, read_receipt: Option<bool>) -> String {
-    let mut prefix = String::new();
-    if let Some(read) = read_receipt {
-        prefix.push_str(if read { "● " } else { "○ " });
-    }
-    prefix.push_str(&format!("{} {}: ", time, name));
-    prefix
+    let receipt_prefix = if let Some(read) = read_receipt {
+        if read { "● " } else { "○ " }
+    } else {
+        "  "
+    };
+    format!("{}{} {}: ", receipt_prefix, time, name)
 }
 
 fn cursor_position(input: &str, cursor: usize, width: u16) -> (u16, u16) {
@@ -1031,13 +1031,15 @@ fn message_spans(
     read_receipt: Option<bool>,
 ) -> Vec<Span<'static>> {
     let mut spans = Vec::new();
-    if let Some(read) = read_receipt {
-        let symbol = if read { "● " } else { "○ " };
-        spans.push(Span::styled(
-            symbol.to_string(),
-            Style::default().fg(Color::Rgb(160, 160, 160)),
-        ));
-    }
+    let receipt_prefix = if let Some(read) = read_receipt {
+        if read { "● " } else { "○ " }
+    } else {
+        "  "
+    };
+    spans.push(Span::styled(
+        receipt_prefix.to_string(),
+        Style::default().fg(Color::Rgb(160, 160, 160)),
+    ));
     let time_span = Span::styled(
         format!("{} ", time),
         Style::default().fg(Color::Rgb(238, 193, 99)),
