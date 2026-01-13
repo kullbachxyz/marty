@@ -638,6 +638,11 @@ impl App {
         body: &str,
         reply_to: Option<&str>,
     ) {
+        let body = if reply_to.is_some() {
+            strip_reply_fallback(body)
+        } else {
+            body
+        };
         if let Some(event_id) = event_id {
             let seen = self.seen_event_ids.entry(room_id.to_string()).or_default();
             if !seen.insert(event_id.to_string()) {
@@ -800,6 +805,19 @@ fn msg_content(item: &MessageItem) -> String {
             format!("[{}] {}", label, filename)
         }
     }
+}
+
+fn strip_reply_fallback(body: &str) -> &str {
+    if !body.starts_with("> ") {
+        return body;
+    }
+    if let Some(pos) = body.find("\r\n\r\n") {
+        return &body[pos + 4..];
+    }
+    if let Some(pos) = body.find("\n\n") {
+        return &body[pos + 2..];
+    }
+    body
 }
 
 fn message_height(item: &MessageItem) -> u16 {
