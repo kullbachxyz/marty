@@ -778,6 +778,15 @@ fn prompt_password(label: &str) -> io::Result<String> {
     Ok(password)
 }
 
+fn print_passphrase_status_line(label: &str, ok: bool) {
+    let (color, symbol) = if ok { (32, "✓") } else { (31, "✗") };
+    print!(
+        "\x1b[1A\r\x1b[2K{} · \x1b[32m********\x1b[0m \x1b[{}m{}\x1b[0m\n",
+        label, color, symbol
+    );
+    let _ = io::stdout().flush();
+}
+
 fn msg_string(item: &MessageItem) -> String {
     match item {
         MessageItem::Separator(label) => format!("==== {} ====", label),
@@ -1530,7 +1539,13 @@ async fn main() -> Result<()> {
         "Enter passphrase: "
     };
     let passphrase = prompt_password(passphrase_prompt)?;
-    decrypt_sessions(&mut cfg, &passphrase)?;
+    match decrypt_sessions(&mut cfg, &passphrase) {
+        Ok(_) => print_passphrase_status_line(passphrase_prompt, true),
+        Err(err) => {
+            print_passphrase_status_line(passphrase_prompt, false);
+            return Err(err.into());
+        }
+    }
     if encrypt_missing_sessions(&mut cfg, &passphrase)? {
         save_config(&config_file, &cfg)?;
     }
