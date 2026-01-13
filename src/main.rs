@@ -802,6 +802,39 @@ fn msg_content(item: &MessageItem) -> String {
     }
 }
 
+fn message_height(item: &MessageItem) -> u16 {
+    match item {
+        MessageItem::Separator(_) => 1,
+        MessageItem::Message { reply_to, .. } => if reply_to.is_some() { 2 } else { 1 },
+        MessageItem::Attachment { reply_to, .. } => if reply_to.is_some() { 2 } else { 1 },
+    }
+}
+
+fn message_window_start(
+    messages: &[MessageItem],
+    height: u16,
+    selected: Option<usize>,
+) -> usize {
+    if messages.is_empty() || height == 0 {
+        return 0;
+    }
+    let target = selected.filter(|idx| *idx < messages.len());
+    let mut idx = target.unwrap_or_else(|| messages.len().saturating_sub(1));
+    let start_idx = idx;
+    let mut remaining = height as i32;
+    loop {
+        let item_height = message_height(&messages[idx]) as i32;
+        if remaining - item_height < 0 {
+            return if idx == start_idx { idx } else { idx + 1 };
+        }
+        remaining -= item_height;
+        if idx == 0 {
+            return 0;
+        }
+        idx = idx.saturating_sub(1);
+    }
+}
+
 fn render_messages_area(
     f: &mut ratatui::Frame,
     area: Rect,
@@ -830,10 +863,11 @@ fn render_messages_area(
         .current_messages()
         .map(|items| items.as_slice())
         .unwrap_or(&[]);
+    let start = message_window_start(messages, inner.height, app.message_selected);
     let buf = f.buffer_mut();
     let mut y = inner.y;
     let max_y = inner.y + inner.height;
-    for (idx, item) in messages.iter().enumerate() {
+    for (idx, item) in messages.iter().enumerate().skip(start) {
         if y >= max_y {
             break;
         }
