@@ -820,17 +820,200 @@ fn strip_reply_fallback(body: &str) -> &str {
     body
 }
 
-fn message_height(item: &MessageItem) -> u16 {
+enum WrapToken {
+    Text(String),
+    Newline,
+}
+
+fn wrap_tokens(text: &str) -> Vec<WrapToken> {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    let mut current_is_space = None;
+    for ch in text.chars() {
+        if ch == '\n' {
+            if !current.is_empty() {
+                tokens.push(WrapToken::Text(current));
+                current = String::new();
+                current_is_space = None;
+            }
+            tokens.push(WrapToken::Newline);
+            continue;
+        }
+        let is_space = ch.is_whitespace();
+        if current_is_space == Some(is_space) || current_is_space.is_none() {
+            current.push(ch);
+            current_is_space = Some(is_space);
+        } else {
+            tokens.push(WrapToken::Text(current));
+            current = String::new();
+            current.push(ch);
+            current_is_space = Some(is_space);
+        }
+    }
+    if !current.is_empty() {
+        tokens.push(WrapToken::Text(current));
+    }
+    tokens
+}
+
+fn wrap_text_lines(text: &str, width: u16) -> Vec<String> {
+    let width = width.max(1) as usize;
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines = Vec::new();
+    let mut line = String::new();
+    let mut line_len = 0usize;
+    for token in wrap_tokens(text) {
+        match token {
+            WrapToken::Newline => {
+                lines.push(line);
+                line = String::new();
+                line_len = 0;
+            }
+            WrapToken::Text(chunk) => {
+                let chunk_len = chunk.chars().count();
+                if line_len > 0 && line_len + chunk_len > width {
+                    lines.push(line);
+                    line = String::new();
+                    line_len = 0;
+                }
+                if chunk_len > width {
+                    for ch in chunk.chars() {
+                        if line_len >= width {
+                            lines.push(line);
+                            line = String::new();
+                            line_len = 0;
+                        }
+                        line.push(ch);
+                        line_len += 1;
+                    }
+                } else {
+                    line.push_str(&chunk);
+                    line_len += chunk_len;
+                }
+            }
+        }
+    }
+    if lines.is_empty() || !line.is_empty() {
+        lines.push(line);
+    }
+    lines
+}
+
+fn reply_preview_text(app: &App, room_id: Option<&str>, reply_id: &str) -> String {
+    let Some(room_id) = room_id else {
+        return "> (unknown)".to_string();
+    };
+    app.reply_preview(room_id, reply_id)
+        .map(|p| format!("> ({}) {}", p.sender, p.text))
+        .unwrap_or_else(|| "> (unknown)".to_string())
+}
+
+fn message_prefix_spans(
+    time: &str,
+    name: &str,
+    sender_id: &str,
+    own_user_id: Option<&str>,
+    read_receipt: Option<bool>,
+) -> (Vec<Span<'static>>, usize) {
+    let receipt_prefix = if let Some(read) = read_receipt {
+        if read { "● " } else { "○ " }
+    } else {
+        "  "
+    };
+    let time_text = format!("{} ", time);
+    let name_text = format!("{}: ", name);
+    let mut spans = Vec::new();
+    spans.push(Span::styled(
+        receipt_prefix.to_string(),
+        Style::default().fg(Color::Rgb(160, 160, 160)),
+    ));
+    spans.push(Span::styled(
+        time_text.clone(),
+        Style::default().fg(Color::Rgb(238, 193, 99)),
+    ));
+    let name_color = color_for_sender(sender_id, own_user_id);
+    spans.push(Span::styled(
+        name_text.clone(),
+        Style::default()
+            .fg(name_color)
+            .add_modifier(Modifier::BOLD),
+    ));
+    let prefix_len = receipt_prefix.len() + time_text.len() + name_text.len();
+    (spans, prefix_len)
+}
+
+fn message_render_height(
+    app: &App,
+    room_id: Option<&str>,
+    item: &MessageItem,
+    width: u16,
+) -> u16 {
+    let width = width.max(1);
     match item {
         MessageItem::Separator(_) => 1,
-        MessageItem::Message { reply_to, .. } => if reply_to.is_some() { 2 } else { 1 },
-        MessageItem::Attachment { reply_to, .. } => if reply_to.is_some() { 2 } else { 1 },
+        MessageItem::Message {
+            time,
+            name,
+            sender_id,
+            text,
+            reply_to,
+            ..
+        } => {
+            let (_, prefix_len) =
+                message_prefix_spans(time, name, sender_id, app.own_user_id.as_deref(), None);
+            if let Some(reply_id) = reply_to.as_deref() {
+                let preview = reply_preview_text(app, room_id, reply_id);
+                let preview_lines =
+                    wrap_text_lines(&preview, width.saturating_sub(prefix_len as u16)).len();
+                let reply_prefix = reply_prefix(time, name, None);
+                let body_lines = wrap_text_lines(
+                    text,
+                    width.saturating_sub(reply_prefix.len() as u16),
+                )
+                .len();
+                (preview_lines + body_lines) as u16
+            } else {
+                wrap_text_lines(text, width.saturating_sub(prefix_len as u16)).len() as u16
+            }
+        }
+        MessageItem::Attachment {
+            time,
+            name,
+            sender_id,
+            label,
+            filename,
+            reply_to,
+            ..
+        } => {
+            let (_, prefix_len) =
+                message_prefix_spans(time, name, sender_id, app.own_user_id.as_deref(), None);
+            let text = format!("[{}] {}", label, filename);
+            if let Some(reply_id) = reply_to.as_deref() {
+                let preview = reply_preview_text(app, room_id, reply_id);
+                let preview_lines =
+                    wrap_text_lines(&preview, width.saturating_sub(prefix_len as u16)).len();
+                let reply_prefix = reply_prefix(time, name, None);
+                let body_lines = wrap_text_lines(
+                    &text,
+                    width.saturating_sub(reply_prefix.len() as u16),
+                )
+                .len();
+                (preview_lines + body_lines) as u16
+            } else {
+                wrap_text_lines(&text, width.saturating_sub(prefix_len as u16)).len() as u16
+            }
+        }
     }
 }
 
 fn message_window_start(
+    app: &App,
+    room_id: Option<&str>,
     messages: &[MessageItem],
     height: u16,
+    width: u16,
     selected: Option<usize>,
 ) -> usize {
     if messages.is_empty() || height == 0 {
@@ -841,7 +1024,7 @@ fn message_window_start(
     let start_idx = idx;
     let mut remaining = height as i32;
     loop {
-        let item_height = message_height(&messages[idx]) as i32;
+        let item_height = message_render_height(app, room_id, &messages[idx], width) as i32;
         if remaining - item_height < 0 {
             return if idx == start_idx { idx } else { idx + 1 };
         }
@@ -881,7 +1064,14 @@ fn render_messages_area(
         .current_messages()
         .map(|items| items.as_slice())
         .unwrap_or(&[]);
-    let start = message_window_start(messages, inner.height, app.message_selected);
+    let start = message_window_start(
+        app,
+        room_id.as_deref(),
+        messages,
+        inner.height,
+        inner.width,
+        app.message_selected,
+    );
     let buf = f.buffer_mut();
     let mut y = inner.y;
     let max_y = inner.y + inner.height;
@@ -907,50 +1097,66 @@ fn render_messages_area(
             } => {
                 if let (Some(reply_id), Some(room_id)) = (reply_to.as_deref(), room_id.as_deref())
                 {
-                    let preview = app.reply_preview(room_id, reply_id);
-                    let reply_text = preview
-                        .map(|p| format!("> ({}) {}", p.sender, p.text))
-                        .unwrap_or_else(|| "> (unknown)".to_string());
+                    let reply_text = reply_preview_text(app, Some(room_id), reply_id);
                     let read_receipt =
                         app.read_receipt_for(room_id, sender_id, event_id.as_deref());
-                    let mut spans = message_spans(
+                    let (prefix_spans, prefix_len) = message_prefix_spans(
                         time,
                         name,
                         sender_id,
                         app.own_user_id.as_deref(),
-                        "",
                         read_receipt,
                     );
-                    spans.push(Span::styled(
-                        reply_text,
-                        Style::default().fg(Color::Rgb(150, 150, 150)),
-                    ));
-                    draw_spans_line(buf, inner, y, &spans, selected);
-                    y = y.saturating_add(1);
+                    y = draw_wrapped_spans(
+                        buf,
+                        inner,
+                        y,
+                        max_y,
+                        &prefix_spans,
+                        prefix_len,
+                        &reply_text,
+                        Some(Style::default().fg(Color::Rgb(150, 150, 150))),
+                        selected,
+                    );
                     if y >= max_y {
                         break;
                     }
                     let prefix = reply_prefix(time, name, read_receipt);
-                    let text_line = vec![
-                        Span::raw(" ".repeat(prefix.len())),
-                        Span::raw(text.to_string()),
-                    ];
-                    draw_spans_line(buf, inner, y, &text_line, selected);
-                    y = y.saturating_add(1);
+                    let prefix_len = prefix.len();
+                    let prefix_spans = vec![Span::raw(prefix)];
+                    y = draw_wrapped_spans(
+                        buf,
+                        inner,
+                        y,
+                        max_y,
+                        &prefix_spans,
+                        prefix_len,
+                        text,
+                        None,
+                        selected,
+                    );
                 } else {
                     let read_receipt = room_id
                         .as_deref()
                         .and_then(|id| app.read_receipt_for(id, sender_id, event_id.as_deref()));
-                    let spans = message_spans(
+                    let (prefix_spans, prefix_len) = message_prefix_spans(
                         time,
                         name,
                         sender_id,
                         app.own_user_id.as_deref(),
-                        text,
                         read_receipt,
                     );
-                    draw_spans_line(buf, inner, y, &spans, selected);
-                    y = y.saturating_add(1);
+                    y = draw_wrapped_spans(
+                        buf,
+                        inner,
+                        y,
+                        max_y,
+                        &prefix_spans,
+                        prefix_len,
+                        text,
+                        None,
+                        selected,
+                    );
                 }
             }
             MessageItem::Attachment {
@@ -966,50 +1172,66 @@ fn render_messages_area(
                 let text = format!("[{}] {}", label, filename);
                 if let (Some(reply_id), Some(room_id)) = (reply_to.as_deref(), room_id.as_deref())
                 {
-                    let preview = app.reply_preview(room_id, reply_id);
-                    let reply_text = preview
-                        .map(|p| format!("> ({}) {}", p.sender, p.text))
-                        .unwrap_or_else(|| "> (unknown)".to_string());
+                    let reply_text = reply_preview_text(app, Some(room_id), reply_id);
                     let read_receipt =
                         app.read_receipt_for(room_id, sender_id, event_id.as_deref());
-                    let mut spans = message_spans(
+                    let (prefix_spans, prefix_len) = message_prefix_spans(
                         time,
                         name,
                         sender_id,
                         app.own_user_id.as_deref(),
-                        "",
                         read_receipt,
                     );
-                    spans.push(Span::styled(
-                        reply_text,
-                        Style::default().fg(Color::Rgb(150, 150, 150)),
-                    ));
-                    draw_spans_line(buf, inner, y, &spans, selected);
-                    y = y.saturating_add(1);
+                    y = draw_wrapped_spans(
+                        buf,
+                        inner,
+                        y,
+                        max_y,
+                        &prefix_spans,
+                        prefix_len,
+                        &reply_text,
+                        Some(Style::default().fg(Color::Rgb(150, 150, 150))),
+                        selected,
+                    );
                     if y >= max_y {
                         break;
                     }
                     let prefix = reply_prefix(time, name, read_receipt);
-                    let text_line = vec![
-                        Span::raw(" ".repeat(prefix.len())),
-                        Span::raw(text.to_string()),
-                    ];
-                    draw_spans_line(buf, inner, y, &text_line, selected);
-                    y = y.saturating_add(1);
+                    let prefix_len = prefix.len();
+                    let prefix_spans = vec![Span::raw(prefix)];
+                    y = draw_wrapped_spans(
+                        buf,
+                        inner,
+                        y,
+                        max_y,
+                        &prefix_spans,
+                        prefix_len,
+                        &text,
+                        None,
+                        selected,
+                    );
                 } else {
                     let read_receipt = room_id
                         .as_deref()
                         .and_then(|id| app.read_receipt_for(id, sender_id, event_id.as_deref()));
-                    let spans = message_spans(
+                    let (prefix_spans, prefix_len) = message_prefix_spans(
                         time,
                         name,
                         sender_id,
                         app.own_user_id.as_deref(),
-                        &text,
                         read_receipt,
                     );
-                    draw_spans_line(buf, inner, y, &spans, selected);
-                    y = y.saturating_add(1);
+                    y = draw_wrapped_spans(
+                        buf,
+                        inner,
+                        y,
+                        max_y,
+                        &prefix_spans,
+                        prefix_len,
+                        &text,
+                        None,
+                        selected,
+                    );
                 }
             }
         }
@@ -1036,27 +1258,56 @@ fn reply_prefix(time: &str, name: &str, read_receipt: Option<bool>) -> String {
 }
 
 fn cursor_position(input: &str, cursor: usize, width: u16) -> (u16, u16) {
-    let max_width = width.max(1) as usize;
+    let width = width.max(1) as usize;
     let mut row = 0u16;
-    let mut col = 0u16;
+    let mut col = 0usize;
     let mut count = 0usize;
-    for ch in input.chars() {
+    for token in wrap_tokens(input) {
         if count >= cursor {
             break;
         }
-        if ch == '\n' {
-            row = row.saturating_add(1);
-            col = 0;
-        } else {
-            col = col.saturating_add(1);
-            if col as usize >= max_width {
+        match token {
+            WrapToken::Newline => {
+                if count == cursor {
+                    break;
+                }
+                count += 1;
                 row = row.saturating_add(1);
                 col = 0;
             }
+            WrapToken::Text(chunk) => {
+                let chunk_len = chunk.chars().count();
+                if col > 0 && col + chunk_len > width {
+                    row = row.saturating_add(1);
+                    col = 0;
+                }
+                if chunk_len > width {
+                    for ch in chunk.chars() {
+                        if count >= cursor {
+                            break;
+                        }
+                        if col >= width {
+                            row = row.saturating_add(1);
+                            col = 0;
+                        }
+                        col += 1;
+                        count += 1;
+                        let _ = ch;
+                    }
+                } else {
+                    for ch in chunk.chars() {
+                        if count >= cursor {
+                            break;
+                        }
+                        col += 1;
+                        count += 1;
+                        let _ = ch;
+                    }
+                }
+            }
         }
-        count += 1;
     }
-    (row, col)
+    (row, col as u16)
 }
 
 fn format_separator(label: &str, width: u16) -> String {
@@ -1072,42 +1323,6 @@ fn format_separator(label: &str, width: u16) -> String {
     let left = fill / 2;
     let right = fill - left;
     format!("{} {} {}", "=".repeat(left), label, "=".repeat(right))
-}
-
-fn message_spans(
-    time: &str,
-    name: &str,
-    sender_id: &str,
-    own_user_id: Option<&str>,
-    text: &str,
-    read_receipt: Option<bool>,
-) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    let receipt_prefix = if let Some(read) = read_receipt {
-        if read { "● " } else { "○ " }
-    } else {
-        "  "
-    };
-    spans.push(Span::styled(
-        receipt_prefix.to_string(),
-        Style::default().fg(Color::Rgb(160, 160, 160)),
-    ));
-    let time_span = Span::styled(
-        format!("{} ", time),
-        Style::default().fg(Color::Rgb(238, 193, 99)),
-    );
-    let name_color = color_for_sender(sender_id, own_user_id);
-    let name_span = Span::styled(
-        format!("{}: ", name),
-        Style::default()
-            .fg(name_color)
-            .add_modifier(Modifier::BOLD),
-    );
-    let text_span = Span::raw(text.to_string());
-    spans.push(time_span);
-    spans.push(name_span);
-    spans.push(text_span);
-    spans
 }
 
 fn color_for_sender(sender_id: &str, own_user_id: Option<&str>) -> Color {
@@ -1136,6 +1351,44 @@ fn is_own_sender(sender_id: &str, own_user_id: Option<&str>) -> bool {
         return true;
     }
     format_sender(sender_id) == format_sender(own)
+}
+
+fn draw_wrapped_spans(
+    buf: &mut Buffer,
+    area: Rect,
+    mut y: u16,
+    max_y: u16,
+    prefix_spans: &[Span<'static>],
+    prefix_len: usize,
+    text: &str,
+    text_style: Option<Style>,
+    selected: bool,
+) -> u16 {
+    if y >= max_y {
+        return y;
+    }
+    let width = area.width.max(1);
+    let text_width = width.saturating_sub(prefix_len as u16).max(1);
+    let lines = wrap_text_lines(text, text_width);
+    for (idx, line) in lines.iter().enumerate() {
+        if y >= max_y {
+            break;
+        }
+        let mut spans: Vec<Span<'static>> = Vec::new();
+        if idx == 0 {
+            spans.extend(prefix_spans.iter().cloned());
+        } else {
+            spans.push(Span::raw(" ".repeat(prefix_len)));
+        }
+        let line_span = match text_style {
+            Some(style) => Span::styled(line.clone(), style),
+            None => Span::raw(line.clone()),
+        };
+        spans.push(line_span);
+        draw_spans_line(buf, area, y, &spans, selected);
+        y = y.saturating_add(1);
+    }
+    y
 }
 
 fn draw_plain_line(buf: &mut Buffer, area: Rect, y: u16, text: &str, selected: bool) {
@@ -1578,17 +1831,41 @@ fn run_app(
                 f.render_stateful_widget(channels_list, main_chunks[0], &mut list_state);
 
                 render_messages_area(f, right_chunks[0], &mut app);
-                let input = Paragraph::new(app.input.as_str())
-                    .block(Block::default().borders(Borders::ALL).title("Input"))
-                    .wrap(Wrap { trim: false });
-                f.render_widget(input, right_chunks[1]);
                 let input_area = right_chunks[1];
+                let inner_width = input_area.width.saturating_sub(2);
+                let inner_height = input_area.height.saturating_sub(2);
+                let (row, col) = if app.input_multiline {
+                    cursor_position(&app.input, app.input_cursor, inner_width)
+                } else {
+                    (0, app.input_cursor as u16)
+                };
+                let (scroll_y, scroll_x) = if app.input_multiline {
+                    let scroll_y = row.saturating_sub(inner_height.saturating_sub(1));
+                    (scroll_y, 0)
+                } else {
+                    let scroll_x = col.saturating_sub(inner_width.saturating_sub(1));
+                    (0, scroll_x)
+                };
+                let input = if app.input_multiline {
+                    Paragraph::new(app.input.as_str())
+                        .block(Block::default().borders(Borders::ALL).title("Input"))
+                        .wrap(Wrap { trim: false })
+                        .scroll((scroll_y, 0))
+                } else {
+                    Paragraph::new(app.input.as_str())
+                        .block(Block::default().borders(Borders::ALL).title("Input"))
+                        .scroll((0, scroll_x))
+                };
+                f.render_widget(input, input_area);
                 let x = input_area.x + 1;
                 let y = input_area.y + 1;
-                let inner_width = input_area.width.saturating_sub(2);
-                let (row, col) = cursor_position(&app.input, app.input_cursor, inner_width);
-                let cursor_y = y.saturating_add(row).min(input_area.y + input_area.height - 2);
-                let cursor_x = x + col.min(inner_width.saturating_sub(1));
+                let cursor_y = y
+                    .saturating_add(row.saturating_sub(scroll_y))
+                    .min(input_area.y + input_area.height - 2);
+                let cursor_x = x
+                    + col
+                        .saturating_sub(scroll_x)
+                        .min(inner_width.saturating_sub(1));
                 f.set_cursor(cursor_x, cursor_y);
             }
 
