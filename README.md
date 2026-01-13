@@ -27,6 +27,13 @@ A Matrix TUI client inspired by gurk-rs.
 - Enter a passphrase to encrypt the local store.
 - Provide homeserver URL, username, and password.
 
+## Keyboard Shortcuts
+For the full list, see `keybinds.md`. Highlights:
+- App: `Alt+Q` quit, `F1` help, `Up/Down` move channels.
+- Messages: `Alt+Up/Alt+Down` select message, `Alt+Y` copy message, `Enter` open URL/attachment when input is empty.
+- Input: `Enter` send (single-line), `Alt+Enter` toggle multi-line, `Alt+Left/Right` jump word.
+- Invites: `Ctrl+A` accept, `Ctrl+D` decline.
+
 ### Building from Source
 ```text
 git clone https://github.com/kullbachxyz/marty
