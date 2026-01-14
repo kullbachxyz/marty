@@ -37,6 +37,7 @@ use crate::matrix::{
 use crate::storage::{load_all_messages, load_all_read_receipts, store_read_receipts};
 
 const TICK_RATE: Duration = Duration::from_millis(100);
+const SELECTED_BG: Color = Color::Rgb(160, 170, 210);
 const HELP_LINES: [&str; 26] = [
     "App navigation",
     "  Alt+Q\tQuit.",
@@ -1406,7 +1407,7 @@ fn draw_plain_line(buf: &mut Buffer, area: Rect, y: u16, text: &str, selected: b
     }
     if selected {
         fill_line(buf, area, y);
-        let style = Style::default().bg(Color::Indexed(15)).fg(Color::Black);
+        let style = Style::default().bg(SELECTED_BG).fg(Color::Black);
         let _ = buf.set_stringn(area.x, y, text, area.width as usize, style);
     } else {
         let _ = buf.set_stringn(area.x, y, text, area.width as usize, Style::default());
@@ -1429,7 +1430,7 @@ fn draw_spans_line(buf: &mut Buffer, area: Rect, y: u16, spans: &[Span], selecte
         let remaining = max_width.saturating_sub((x - area.x) as usize);
         let style = if selected {
             Style::default()
-                .bg(Color::Indexed(15))
+                .bg(SELECTED_BG)
                 .fg(Color::Black)
                 .add_modifier(Modifier::BOLD)
         } else {
@@ -1444,7 +1445,7 @@ fn fill_line(buf: &mut Buffer, area: Rect, y: u16) {
     for x in 0..area.width {
         buf.get_mut(area.x + x, y)
             .set_symbol(" ")
-            .set_bg(Color::Indexed(15))
+            .set_bg(SELECTED_BG)
             .set_fg(Color::Black);
     }
 }
@@ -1838,7 +1839,7 @@ fn run_app(
                     .block(Block::default().borders(Borders::ALL).title("Channels"))
                     .highlight_style(
                         Style::default()
-                            .bg(Color::Rgb(160, 170, 210))
+                            .bg(SELECTED_BG)
                             .fg(Color::Black)
                             .add_modifier(Modifier::BOLD),
                     );
