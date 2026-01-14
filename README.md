@@ -40,7 +40,7 @@ A Matrix TUI client inspired by gurk-rs.
 | `Ctrl+A` | Accept invite. |
 | `Ctrl+D` | Decline invite. |
 | `Alt+V` | Start verification (SAS). |
-| `Enter` | When input empty (single-line): open URL/attachment. |
+| `Enter` | When input empty (single-line): open URL under cursor, or open the selected attachment message. |
 | `Enter` | Send message (single-line) or insert newline (multi-line). |
 | `file://<path>` | Send attachment from disk. |
 | `Alt+Enter` | Toggle multi-line input. |
