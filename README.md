@@ -28,11 +28,31 @@ A Matrix TUI client inspired by gurk-rs.
 - Provide homeserver URL, username, and password.
 
 ## Keyboard Shortcuts
-For the full list, see `keybinds.md`. Highlights:
-- App: `Alt+Q` quit, `F1` help, `Up/Down` move channels.
-- Messages: `Alt+Up/Alt+Down` select message, `Alt+Y` copy message, `Enter` open URL/attachment when input is empty.
-- Input: `Enter` send (single-line), `Alt+Enter` toggle multi-line, `Alt+Left/Right` jump word.
-- Invites: `Ctrl+A` accept, `Ctrl+D` decline.
+| Category | Key | Action |
+| --- | --- | --- |
+| App navigation | `Alt+Q` | Quit. |
+| App navigation | `F1` | Toggle help panel showing shortcuts. |
+| App navigation | `Up` | One channel up. |
+| App navigation | `Down` | One channel down. |
+| App navigation | `Alt+A` | Add chat (room or user). |
+| App navigation | `Alt+J` | Join/add chat (room or user). |
+| App navigation | `Alt+D` | Delete chat (y/n confirm). |
+| App navigation | `Ctrl+A` | Accept invite. |
+| App navigation | `Ctrl+D` | Decline invite. |
+| App navigation | `Alt+V` | Start verification (SAS). |
+| Message input | `Enter` | When input empty (single-line): open URL/attachment. |
+| Message input | `Enter` | Send message (single-line) or insert newline (multi-line). |
+| Message input | `file://<path>` | Send attachment from disk. |
+| Message input | `Alt+Enter` | Toggle multi-line input. |
+| Message input | `Left`/`Right` | Move cursor in input. |
+| Message input | `Alt+Left`/`Alt+Right` | Jump word in input. |
+| Message/channel selection | `Esc` | Reset message selection or close channel selection popup. |
+| Message/channel selection | `Alt+Up` | Select previous message. |
+| Message/channel selection | `Alt+Down` | Select next message. |
+| Clipboard | `Alt+Y` | Copy message content to clipboard. |
+| Help menu | `Esc` | Close help panel. |
+| Help menu | `Up` | Previous line. |
+| Help menu | `Down`/`PgDown` | Next line. |
 
 ### Building from Source
 ```text
@@ -70,7 +90,6 @@ marty/
 │   ├── matrix.rs       # Matrix client, sync, and commands
 │   ├── config.rs       # Config + data directories
 │   └── storage.rs      # Encrypted message storage
-├── keybinds.md         # Keybinding reference
 ├── Cargo.toml
 └── README.md
 ```
